@@ -9,8 +9,10 @@
 #include "cppTypes.h"
 #include "mip_sdk.h"
 #include "mip_gx4_25.h"
-
 #include "../../lcm-types/cpp/microstrain_lcmt.hpp"
+
+//#define USE_LordIMU
+#define USE_SelfIMU
 
 struct LordImuDeviceInfo {
   std::string modelName;

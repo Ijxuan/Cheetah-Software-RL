@@ -6,6 +6,221 @@
 #include "../../common/include/Dynamics/spatial.h"
 #include "../../common/include/Math/orientation_tools.h"
 
+int p1=0;
+float gAcc[3]={0,0,0};
+const size_t YIS_HEADER_1ST = 0x59;
+const size_t YIS_HEADER_2ND = 0x53;
+const size_t PROTOCOL_MIN_LEN = 7;
+const size_t PROTOCOL_TID_LEN = 2;
+const size_t PROTOCOL_PAYLOAD_LEN = 1;
+const size_t PROTOCOL_CHECKSUM_LEN = 2;
+const size_t PROTOCOL_TID_POS = 2;
+const size_t PROTOCOL_PAYLOAD_LEN_POS = 4;
+const size_t CRC_CALC_START_POS = 2;
+const size_t PAYLOAD_POS = 5;
+const size_t TLV_HEADER_LEN = 2;
+
+const size_t acc_id = 0x10;
+const size_t gyro_id = 0x20;
+const size_t euler_id = 0x40;
+const size_t quaternion_id = 0x41;
+
+const size_t acc_len = 0x0C;
+const size_t gyro_len = 0x0C;
+const size_t euler_len = 0x0C;
+const size_t quaternion_len = 0x10;
+
+const double data_factor = 0.000001;
+
+
+std::vector<int> buf(512);
+size_t buf_len = 0;
+
+struct YISOut {
+    int tid = 1;
+    float roll, pitch, yaw;
+    float q0, q1, q2, q3;
+    float acc_x, acc_y, acc_z;
+    float gyro_x, gyro_y, gyro_z;
+};
+
+bool decode_data(const std::vector<int>& data, size_t num, YISOut& info, bool debug_flg);
+void clear_data(size_t clr_len);
+bool parse_data_by_id(int id, size_t len, const std::vector<int>& payload, YISOut& info);
+int calc_checksum(const std::vector<int>& data, size_t len);
+int get_int32_lit(const std::vector<int>& data);
+
+bool decode_data(const std::vector<int>& data, size_t num, YISOut& info, bool debug_flg) {
+    size_t pos = 0;
+    size_t cnt = 0;
+    size_t data_len = 0;
+    int check_sum = 0;
+
+
+    std::copy(data.begin(), data.begin() + num, buf.begin() + buf_len);
+    buf_len += num;
+
+
+    if (buf_len < PROTOCOL_MIN_LEN) {
+        if (debug_flg) {
+            std::cout << "len not enough" << std::endl;
+        }
+        return false;
+    }
+
+    cnt = buf_len;
+
+
+    while (cnt > 0) {
+        if (YIS_HEADER_1ST == buf[pos] && YIS_HEADER_2ND == buf[pos + 1]) {
+            break;
+        } else {
+            cnt--;
+            pos++;
+        }
+    }
+
+    if (debug_flg) {
+        std::cout << "start pos = " << pos << std::endl;
+    }
+
+    if (cnt < PROTOCOL_MIN_LEN) {
+        if (debug_flg) {
+            std::cout << "clear_data" << std::endl;
+        }
+        clear_data(pos);
+        return false;
+    }
+
+    data_len = buf[pos + PROTOCOL_PAYLOAD_LEN_POS];
+    if (debug_flg) {
+        std::cout << "payload_len = " << data_len << std::endl;
+    }
+
+
+    if (PROTOCOL_MIN_LEN + data_len > cnt) {
+        clear_data(pos);
+        return false;
+    }
+
+    check_sum = calc_checksum(std::vector<int>(buf.begin() + pos + CRC_CALC_START_POS, buf.end()), data_len + PROTOCOL_TID_LEN + PROTOCOL_PAYLOAD_LEN);
+    const size_t PROTOCOL_CRC_DATA_POS = CRC_CALC_START_POS + data_len + PROTOCOL_TID_LEN + PROTOCOL_PAYLOAD_LEN;
+    if (check_sum != (buf[pos + PROTOCOL_CRC_DATA_POS] + (buf[pos + PROTOCOL_CRC_DATA_POS + 1] << 8))) {
+        clear_data(pos + data_len + PROTOCOL_MIN_LEN);
+        return false;
+    }
+
+    info.tid = buf[pos + PROTOCOL_TID_POS] + (buf[pos + PROTOCOL_TID_POS + 1] << 8);
+    cnt = data_len;
+
+
+    pos += PAYLOAD_POS;
+    while (data_len > 0 && pos <= buf_len) {
+        int id = buf[pos];
+        int len = buf[pos + 1];
+        bool ret = parse_data_by_id(id, len, std::vector<int>(buf.begin() + pos + TLV_HEADER_LEN, buf.end()), info);
+        if (debug_flg) {
+            std::cout << "id: " << static_cast<int>(id) << ", len: " << static_cast<int>(len) << ", ret = " << ret << std::endl;
+        }
+        if (ret) {
+            pos += len + TLV_HEADER_LEN;
+            data_len -= len + TLV_HEADER_LEN;
+        } else {
+            pos += 1;
+            data_len -= 1;
+        }
+    }
+
+    if (debug_flg) {
+        std::cout << "total len : " << buf_len << std::endl;
+    }
+
+    clear_data(pos + PROTOCOL_CHECKSUM_LEN);
+    if (debug_flg) {
+        std::cout << "anlysis done, pos = " << pos << ", buf_len left " << buf_len << std::endl;
+    }
+    return true;
+}
+
+void clear_data(size_t clr_len) {
+    if (clr_len == 0) {
+        return;
+    }
+
+    std::fill(buf.begin(), buf.begin() + clr_len, 0);
+
+    if (buf_len > clr_len) {
+        std::copy(buf.begin() + clr_len, buf.begin() + buf_len, buf.begin());
+        std::fill(buf.begin() + buf_len - clr_len, buf.end(), 0);
+        buf_len -= clr_len;
+    } else {
+        buf_len = 0;
+    }
+}
+
+bool parse_data_by_id(int id, size_t len, const std::vector<int>& payload, YISOut& info) {
+    switch (id) {
+        case acc_id:
+            if (len == acc_len) {
+                info.acc_x = get_int32_lit(std::vector<int>(payload.begin(), payload.begin() + 4)) * data_factor;
+                info.acc_y = get_int32_lit(std::vector<int>(payload.begin() + 4, payload.begin() + 8)) * data_factor;
+                info.acc_z = get_int32_lit(std::vector<int>(payload.begin() + 8, payload.begin() + 12)) * data_factor;
+                return true;
+            }
+            break;
+        case gyro_id:
+            if (len == gyro_len) {
+                info.gyro_x = get_int32_lit(std::vector<int>(payload.begin(), payload.begin() + 4)) * data_factor;
+                info.gyro_y = get_int32_lit(std::vector<int>(payload.begin() + 4, payload.begin() + 8)) * data_factor;
+                info.gyro_z = get_int32_lit(std::vector<int>(payload.begin() + 8, payload.begin() + 12)) * data_factor;
+                return true;
+            }
+            break;
+        case euler_id:
+            if (len == euler_len) {
+                info.pitch = get_int32_lit(std::vector<int>(payload.begin(), payload.begin() + 4)) * data_factor;
+                info.roll = get_int32_lit(std::vector<int>(payload.begin() + 4, payload.begin() + 8)) * data_factor;
+                info.yaw = get_int32_lit(std::vector<int>(payload.begin() + 8, payload.begin() + 12)) * data_factor;
+                return true;
+            }
+            break;
+        case quaternion_id:
+            if (len == quaternion_len) {
+                info.q0 = get_int32_lit(std::vector<int>(payload.begin(), payload.begin() + 4)) * data_factor;
+                info.q1 = get_int32_lit(std::vector<int>(payload.begin() + 4, payload.begin() + 8)) * data_factor;
+                info.q2 = get_int32_lit(std::vector<int>(payload.begin() + 8, payload.begin() + 12)) * data_factor;
+                info.q3 = get_int32_lit(std::vector<int>(payload.begin() + 12, payload.begin() + 16)) * data_factor;
+                return true;
+            }
+            break;
+        default:
+            return false;
+    }
+    return false;
+}
+
+int calc_checksum(const std::vector<int>& data, size_t len) {
+    int check_a = 0x00;
+    int check_b = 0x00;
+    for (size_t i = 0; i < len; ++i) {
+        check_a += data[i];
+        check_b += check_a;
+    }
+    return ((check_b % 256) << 8) + (check_a % 256);
+}
+
+int get_int32_lit(const std::vector<int>& data) {
+    int temp = 0;
+    for (size_t i = 0; i < 4; ++i) {
+        temp += data[i] << (i * 8);
+    }
+    //if (temp & 0x80000000) {
+        //temp = (temp ^ 0xFFFFFFFF) + 1;
+    //}
+    return temp;
+}
+
+
 constexpr u32 IMU_PACKET_TIMEOUT_MS = 1000;
 //constexpr u32 MIP_SDK_GX4_25_IMU_DIRECT_MODE = 0x02;
 constexpr u32 MIP_SDK_STANDARD_MODE = 0x01;
@@ -24,6 +239,7 @@ bool LordImu::tryInit(u32 port, u32 baud_rate) {
 }
 
 void LordImu::init(u32 port, u32 baud_rate) {
+#ifdef USE_LordIMU
   printf("[Lord IMU] Open port %d, baud rate %d\n", port, baud_rate);
 
   if(mip_interface_init(port, baud_rate, &device_interface, IMU_PACKET_TIMEOUT_MS) != MIP_INTERFACE_OK) {
@@ -44,6 +260,31 @@ void LordImu::init(u32 port, u32 baud_rate) {
   setup_streaming();
   printf("[Lord IMU] Enable Data...\n");
   enable();
+#endif
+
+#ifdef USE_SelfIMU
+    printf("[Lord IMU] Open port %d, baud rate %d\n", port, baud_rate);
+
+    if(mip_interface_init(port, baud_rate, &device_interface, IMU_PACKET_TIMEOUT_MS) != MIP_INTERFACE_OK) {
+        throw std::runtime_error("Failed to initialize MIP interface for IMU\n");
+    }
+
+
+    printf("[Lord IMU] Port open. Mode setup...\n");
+    //mode_setup();
+    printf("[Lord IMU] Get info...\n");
+    //get_device_info();
+    printf("[Lord IMU] Self test...\n");
+    //self_test();
+    printf("[Lord IMU] Basic report...\n");
+    // basic_report();
+//  printf("[Lord IMU] Zero Gyro...\n");
+//  zero_gyro();
+    printf("[Lord IMU] Setup IMU...\n");
+    setup_streaming();
+    printf("[Lord IMU] Enable Data...\n");
+    //enable();
+#endif
 }
 
 void LordImu::mode_setup() {
@@ -167,7 +408,7 @@ void LordImu::basic_report() {
 //  }
 }
 static LordImu* gLordImu;
-static void filter_callback(void* user_ptr, u8* packet, u16 packet_size, u8 callback_type) {
+/* static void filter_callback(void* user_ptr, u8* packet, u16 packet_size, u8 callback_type) {
   (void)user_ptr;
   (void)packet_size;
 
@@ -220,11 +461,12 @@ static void filter_callback(void* user_ptr, u8* packet, u16 packet_size, u8 call
       break;
   }
 
-}
+} */
 
 
 
 static void ahrs_callback(void* user_ptr, u8* packet, u16 packet_size, u8 callback_type) {
+#ifdef USE_LordIMU
   (void)user_ptr;
   (void)packet_size;
 
@@ -280,10 +522,46 @@ static void ahrs_callback(void* user_ptr, u8* packet, u16 packet_size, u8 callba
       gLordImu->unknown_packets++;
       break;
   }
+#endif
+
+#ifdef USE_SelfIMU
+    (void)user_ptr;
+    (void)packet_size;
+
+    mip_field_header* field_header;
+    u8* field_data;
+    u16 field_offset = 0;
+
+    switch(callback_type) {
+        case MIP_INTERFACE_CALLBACK_VALID_PACKET:
+            //gLordImu->good_packets++;
+            while(mip_get_next_field(packet, &field_header,
+                                     &field_data, &field_offset) == MIP_OK) {
+                switch(field_header->descriptor) {
+
+                    default:
+
+                        printf("[Lord IMU] Unknown AHRS packet %d\n", field_header->descriptor);
+                        break;
+                }
+            }
+            break;
+        case MIP_INTERFACE_CALLBACK_CHECKSUM_ERROR:
+            gLordImu->invalid_packets++;
+            break;
+        case MIP_INTERFACE_CALLBACK_TIMEOUT:
+            gLordImu->timeout_packets++;
+            break;
+        default:
+            gLordImu->unknown_packets++;
+            break;
+    }
+#endif
 }
 
 
 void LordImu::setup_streaming() {
+#ifdef USE_LordIMU
   gLordImu = this;
 
   u8 enable = MIP_3DM_CONING_AND_SCULLING_DISABLE;
@@ -320,6 +598,20 @@ void LordImu::setup_streaming() {
        MIP_FUNCTION_SELECTOR_WRITE, &num_entries, data_types, data_downsampling) != MIP_INTERFACE_OK) {
     printf("fail\n");
   }
+#endif
+
+#ifdef USE_SelfIMU
+    gLordImu = this;
+    // if(mip_interface_add_descriptor_set_callback(&device_interface,
+    //                                              MIP_FILTER_DATA_SET, nullptr, filter_callback) != MIP_INTERFACE_OK) {
+    //     throw std::runtime_error("failed to set IMU filter callback");
+    // }
+
+    if(mip_interface_add_descriptor_set_callback(&device_interface,
+                                                 MIP_AHRS_DATA_SET, nullptr, ahrs_callback) != MIP_INTERFACE_OK) {
+        throw std::runtime_error("failed to set IMU ahrs callback");
+    }
+#endif
 }
 
 void LordImu::enable() {
@@ -364,8 +656,49 @@ void LordImu::enable() {
 }
 
 void LordImu::run() {
-  for(u32 i = 0; i < 32; i++)
-    mip_interface_update(&device_interface);
+  for(u32 i = 0; i < 32; i++){
+    int dat[170];
+    mip_interface_update(&device_interface,dat);
+
+    p1++;
+
+    if (p1%250==0){
+      //printf("      %d %d\n",p1,dat[65]);
+      YISOut imu;
+      std::vector<int> data(dat,dat+67);
+      size_t num = 67;//data.size();
+      bool ret = decode_data(data, num, imu, false);   
+      //printf("acc (%.2f,%.2f,%.2f)\n",gLordImu->acc[0],gLordImu->acc[1],gLordImu->acc[2]);    
+      if (ret ) {
+
+        dataMutex.lock();
+        gLordImu->good_packets++;
+        gAcc[0]=gLordImu->acc[0] = -imu.acc_x;
+        gAcc[1]=gLordImu->acc[1] = -imu.acc_y;
+        gAcc[2]=gLordImu->acc[2] = imu.acc_z;
+        
+        gLordImu->gyro[0] = -imu.gyro_x/100;
+        gLordImu->gyro[1] = -imu.gyro_y/100;
+        gLordImu->gyro[2] = imu.gyro_z/100;
+
+        gLordImu->quat[0] = -imu.q0;
+        gLordImu->quat[1] = imu.q1;
+        gLordImu->quat[2] = imu.q2;
+        gLordImu->quat[3] = -imu.q3;
+        dataMutex.unlock();
+
+      }
+
+        dataMutex.lock();
+        gLordImu->good_packets++;
+        gLordImu->acc[0] = gAcc[0];
+        gLordImu->acc[1] = gAcc[1];
+        gLordImu->acc[2] = gAcc[2];
+        dataMutex.unlock();
+
+    }
+
+  }
   usleep(100);
 }
 

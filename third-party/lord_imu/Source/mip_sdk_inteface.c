@@ -172,7 +172,7 @@ u16 mip_interface_close(mip_interface *device_interface)
 //!
 /////////////////////////////////////////////////////////////////////////////
 
-u16 mip_interface_update(mip_interface *device_interface)
+u16 mip_interface_update(mip_interface *device_interface,int *dat)
 {
  u32 num_bytes, bytes_read = 0, bytes_written = 0;
  u8  local_buffer[MIP_INTERFACE_INPUT_RING_BUFFER_SIZE];
@@ -195,17 +195,19 @@ u16 mip_interface_update(mip_interface *device_interface)
  
  
  //Read up to max ring buffer size from the port
- if(num_bytes > 0)
+ if(num_bytes > 0){
   mip_sdk_port_read(device_interface->port_handle, local_buffer, num_bytes, &bytes_read, MIP_INTERFACE_PORT_READ_TIMEOUT_MS);
 
+  for(int i=0;i<67;i++)dat[i]=local_buffer[i];
+  //memcpy(&dat, &local_buffer, sizeof(local_buffer));
+ }
+
  //Write the local buffer to the ring buffer
- if(bytes_read > 0)
+ if(bytes_read)
  { 
-  //printf("Got %d bytes\n", bytes_read);
   ring_buffer_write_multi(&device_interface->input_buffer, local_buffer, bytes_read, &bytes_written);
  }
  
- //Parse the data
  __mip_interface_parse_input_buffer(device_interface);
  
  
@@ -439,6 +441,10 @@ u16 __mip_interface_parse_input_buffer(mip_interface *device_interface)
  mip_header          *header_ptr = (mip_header*)device_interface->mip_packet;
  parser_callback_ptr  callback_function = NULL;
  void                *callback_user_ptr = NULL;
+
+ //rlh
+  //(*callback_function)(callback_user_ptr, device_interface->mip_packet, device_interface->mip_packet_byte_count, MIP_INTERFACE_CALLBACK_VALID_PACKET);
+
  
  //Check that the parser is initialized
  if(device_interface->state != MIP_INTERFACE_INITIALIZED)
@@ -1061,7 +1067,8 @@ u16  __mip_interface_wait_for_response(mip_interface *device_interface, u8 comma
  while(__mip_interface_time_timeout(start_time, timeout_ms) == MIP_INTERFACE_NO_TIMEOUT)
  {
   //Allow the parser to run
-  mip_interface_update(device_interface);
+  //rlh 2024.10.23
+  //mip_interface_update(device_interface);
   
   //Got a response
   if((device_interface->command_response_received == 1) && (device_interface->command_id == command_descriptor))
