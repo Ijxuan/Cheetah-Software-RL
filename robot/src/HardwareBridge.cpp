@@ -54,8 +54,12 @@ void HardwareBridge::initCommon() {
 
   printf("[HardwareBridge] Subscribe LCM\n");
   _interfaceLCM.subscribe("interface", &HardwareBridge::handleGamepadLCM, this);
-  _interfaceLCM.subscribe("interface_request",
-                          &HardwareBridge::handleControlParameter, this);
+  _interfaceLCM.subscribe("interface_request", &HardwareBridge::handleControlParameter, this);
+  //_interfaceLCM.subscribe ("t265_position_msg", &HardwareBridge::handleT265LCM , this );
+
+
+// _key_lcm.subscribe("KEYBOARD", &HardwareBridge::handleMessage,this);
+// _interfaceLCM.subscribe("KEYBOARD", &HardwareBridge::handleMessage,this);
 
   printf("[HardwareBridge] Start interface LCM handler\n");
   _interfaceLcmThread = std::thread(&HardwareBridge::handleInterfaceLCM, this);
