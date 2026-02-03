@@ -24,9 +24,9 @@ DATE=$(date +"%Y%m%d%H%M")
 if [ -z "$2" ]
 then
   echo "No mini-cheetah number specified, using old mini-cheetah address"
-  scp -r robot-software user@10.0.0.34:~/
+  scp -r robot-software user@10.0.0.34:~/RL
 else
-  scp -r robot-software user@10.0.0.4$2:~/
+  scp -r robot-software user@10.0.0.4$2:~/RL
 fi
 
 

@@ -142,7 +142,8 @@ void FSM_State_RLJointPD<T>::run() {
   }
 
   double kneeGearRatio = 9.33 / 6.;
-  bool isMinicheetah = true;  /// TODO: true for the real robot, false for the simulation test
+  bool isMinicheetah = true;  
+  /// TODO: true for the real robot, false for the simulation test
 
   if (isMinicheetah) {
     this->kpMat = Vec3<T>(17, 17, 17 / (kneeGearRatio * kneeGearRatio)).asDiagonal();

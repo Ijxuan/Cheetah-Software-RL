@@ -2,6 +2,7 @@ build/
 mc-build/
 cmake-build-debug/
 .idea/
+.history/
 lcm-types/cheetahlcm
 lcm-types/c_lcm_files
 lcm-types/controllerlcm
