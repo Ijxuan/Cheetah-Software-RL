@@ -20,6 +20,7 @@
 #include "rt/rt_vectornav.h"
 #include "rt/rt_ethercat.h"
 #include "Utilities/Utilities_print.h"
+#include <chrono>
 
 #define USE_MICROSTRAIN
 
@@ -324,8 +325,7 @@ void MiniCheetahHardwareBridge::run() {
       &MiniCheetahHardwareBridge::publishVisualizationLCM, this);
   visualizationLCMTask.start();
 
-  // rc controller
-  _port = init_sbus(false);  // Not Simulation
+  _port = init_js();
   PeriodicMemberFunction<HardwareBridge> sbusTask(
       &taskManager, .005, "rc_controller", &HardwareBridge::run_sbus, this);
   sbusTask.start();
@@ -344,14 +344,15 @@ void MiniCheetahHardwareBridge::run() {
 /*!
  * Receive RC with SBUS
  */
-void HardwareBridge::run_sbus() {
-  if (_port > 0) {
-    int x = receive_sbus(_port);
-    if (x) {
-      sbus_packet_complete();
-    }
-  }
+// int first_time_run=1;
+// int run_times=0;
+void HardwareBridge::run_sbus()
+ {
+//rlh 2023.6.10
+  if (_port > 0) js_complete(_port);
 }
+
+
 
 void MiniCheetahHardwareBridge::runMicrostrain() {
   while(true) {
@@ -389,7 +390,9 @@ void MiniCheetahHardwareBridge::initHardware() {
 #endif
 
   init_spi();
-  _microstrainInit = _microstrainImu.tryInit(0, 921600);
+
+  _microstrainInit = _microstrainImu.tryInit(0, 460800);//921600); // lord设置921600,        ttyUSB0
+
 }
 
 void Cheetah3HardwareBridge::initHardware() {
@@ -576,10 +579,11 @@ void Cheetah3HardwareBridge::run() {
   visualizationLCMTask.start();
 
   // rc controller disabled for now
-//  _port = init_sbus(false);  // Not Simulation
-//  PeriodicMemberFunction<HardwareBridge> sbusTask(
-//      &taskManager, .005, "rc_controller", &HardwareBridge::run_sbus, this);
-//  sbusTask.start();
+  //sbus remoter
+  _port = init_sbus(false);  // Not Simulation
+  PeriodicMemberFunction<HardwareBridge> sbusTask(
+      &taskManager, .005, "rc_controller", &HardwareBridge::run_sbus, this);
+  sbusTask.start();
 
 
   for (;;) {

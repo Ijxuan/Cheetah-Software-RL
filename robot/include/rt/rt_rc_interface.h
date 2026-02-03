@@ -15,6 +15,7 @@ class rc_control_settings {
     double     rpy_des[3]; // -1 ~ 1
     double     omega_des[3]; // -1 ~ 1
     double     variable[3];
+    double     step_height;
 };
 
 
@@ -34,6 +35,15 @@ namespace RC_mode{
 };
 
 void sbus_packet_complete();
+
+
+//rlh 2023.6.10
+void js_complete(int port);
+int init_js();
+void auto_speed();
+
+void keyboard_ing();
+
 
 void get_rc_control_settings(void* settings);
 //void get_rc_channels(void* settings);
