@@ -17,17 +17,17 @@ rc_control_settings rc_control;
 
 // Controller Settings
 void get_rc_control_settings(void *settings)
- {
-  pthread_mutex_lock(&lcm_get_set_mutex);
-  v_memcpy(settings, &rc_control, sizeof(rc_control_settings));
-  pthread_mutex_unlock(&lcm_get_set_mutex);
+{
+    pthread_mutex_lock(&lcm_get_set_mutex);
+    v_memcpy(settings, &rc_control, sizeof(rc_control_settings));
+    pthread_mutex_unlock(&lcm_get_set_mutex);
 }
 
-//void get_rc_channels(void *settings) {
-//pthread_mutex_lock(&lcm_get_set_mutex);
-//v_memcpy(settings, &rc_channels, sizeof(rc_channels));
-//pthread_mutex_unlock(&lcm_get_set_mutex);
-//}
+// void get_rc_channels(void *settings) {
+// pthread_mutex_lock(&lcm_get_set_mutex);
+// v_memcpy(settings, &rc_channels, sizeof(rc_channels));
+// pthread_mutex_unlock(&lcm_get_set_mutex);
+// }
 
 EdgeTrigger<int> mode_edge_trigger(0);
 EdgeTrigger<TaranisSwitchState> backflip_prep_edge_trigger(SWITCH_UP);
@@ -281,10 +281,10 @@ void js_complete(int port)
         rc_control.mode = RC_mode::RECOVERY_STAND;
     else if (map.lt > 30000 && map.b) // LT+B，失能
         rc_control.mode = RC_mode::OFF;
-    else if (rc_control.mode != RC_mode::OFF && rc_control.mode != RC_mode::LOCOMOTION && map.back)
-        rc_control.mode = RC_mode::LOCOMOTION; // 如果不是失能和运动模式，按下back键，进入运动模式-原地展示
+    else if (rc_control.mode != RC_mode::OFF && rc_control.mode != RC_mode::RL_JOINT_PD && map.back)
+        rc_control.mode = RC_mode::RL_JOINT_PD; // 如果不是失能和运动模式，按下back键，进入运动模式-原地展示
     else if (rc_control.mode != RC_mode::OFF && ((map.lt > 30000 && map.x) || map.start))
-        rc_control.mode = RC_mode::QP_STAND; // 如果不是失能模式，按下start键或者（按下lt加x键），进入站立模式-可以移动
+        rc_control.mode = RC_mode::RECOVERY_STAND; // 如果不是失能模式，按下start键或者（按下lt加x键），进入站立模式-可以移动
     else if (rc_control.mode == RC_mode::QP_STAND)
     {
         rc_control.rpy_des[0] = (float)map.lx / 32768; // 如果是站立模式，设置目标角度
@@ -296,6 +296,16 @@ void js_complete(int port)
         rc_control.omega_des[1] = 0;
         rc_control.omega_des[2] = 0;
     }
+    if (rc_control.mode == RC_mode::RL_JOINT_PD)
+    {
+        rc_control.v_des[0] = -1.0 * (float)map.ly / 32768; // 应该是前后速度
+        rc_control.v_des[1] = -1.0 * (float)map.lx / 32768; // 应该 是左右速度
+        rc_control.v_des[2] = 0;
+        rc_control.omega_des[0] = 0;
+        rc_control.omega_des[1] = 0; // pitch，俯仰角度
+        rc_control.omega_des[2] = (float)map.rx / 32768;  // yaw *3.0旋转角度
+    }
+
     if (rc_control.mode == RC_mode::LOCOMOTION)
     { // 如果是运动模式
         if (map.y)
@@ -353,12 +363,12 @@ void js_complete(int port)
     if (map.rb)
     {
         remote_control = true;
-                printf("rb is down  remote_control open\n"); //
+        printf("rb is down  remote_control open\n"); //
     }
     if (map.rt > 15000)
     {
         remote_control = false;
-        printf("map.rt is  %d  remote_control close\n",map.rt); //
+        printf("map.rt is  %d  remote_control close\n", map.rt); //
     }
 }
 
@@ -372,70 +382,76 @@ int init_js()
     js_gait = 3;
     return fd;
 }
-void sbus_packet_complete() {
-  Taranis_X7_data data;
-  update_taranis_x7(&data);
+void sbus_packet_complete()
+{
+    Taranis_X7_data data;
+    update_taranis_x7(&data);
 
     float v_scale = data.knobs[0] * 1.5f + 2.0f; // from 0.5 to 3.5
     float w_scale = 2. * v_scale;                // from 1.0 to 7.0
-    // printf("v scale: %f\n", v_scale);
+                                                 // printf("v scale: %f\n", v_scale);
 
-  auto estop_switch = data.right_lower_right_switch;
+    auto estop_switch = data.right_lower_right_switch;
 
-  int selected_mode = 0;
+    int selected_mode = 0;
 
-  switch (estop_switch)
-   {
+    switch (estop_switch)
+    {
 
     case SWITCH_UP: // ESTOP
-      selected_mode = RC_mode::OFF;
-      break;
+        selected_mode = RC_mode::OFF;
+        break;
 
     case SWITCH_MIDDLE: // recover
-      selected_mode = RC_mode::RECOVERY_STAND;
-      break;
+        selected_mode = RC_mode::RECOVERY_STAND;
+        break;
 
     case SWITCH_DOWN: // run
-      selected_mode = RC_mode::RL_JOINT_PD;
+        selected_mode = RC_mode::RL_JOINT_PD;
 
+        // Deadband
+        for (int i(0); i < 2; ++i)
+        {
+            data.left_stick[i] = deadband(data.left_stick[i], 0.1, -1., 1.);
+            data.right_stick[i] = deadband(data.right_stick[i], 0.1, -1., 1.);
+        }
 
-    // Deadband
-    for(int i(0); i<2; ++i){
-      data.left_stick[i] = deadband(data.left_stick[i], 0.1, -1., 1.);
-      data.right_stick[i] = deadband(data.right_stick[i], 0.1, -1., 1.);
+        rc_control.v_des[0] = v_scale * data.left_stick[1];
+        rc_control.v_des[1] = -v_scale * data.left_stick[0] / (data.knobs[0] * 1.5f + 2.0f);
+        rc_control.v_des[2] = 0;
+
+        rc_control.omega_des[0] = 0;
+        rc_control.omega_des[1] = 0;
+        rc_control.omega_des[2] = -w_scale * data.right_stick[0];
+
+        break;
     }
 
-    rc_control.v_des[0] = v_scale * data.left_stick[1];
-    rc_control.v_des[1] = -v_scale * data.left_stick[0] / (data.knobs[0]*1.5f + 2.0f);
-    rc_control.v_des[2] = 0;
-
-    rc_control.omega_des[0] = 0;
-    rc_control.omega_des[1] = 0;
-    rc_control.omega_des[2] = -w_scale * data.right_stick[0];
-
-      break;
-  }
-
-bool trigger = mode_edge_trigger.trigger(selected_mode);
-if(trigger || selected_mode == RC_mode::OFF || selected_mode == RC_mode::RECOVERY_STAND) {
-  if(trigger) {
-    printf("MODE TRIGGER!\n");
-  }
-  rc_control.mode = selected_mode;
+    bool trigger = mode_edge_trigger.trigger(selected_mode);
+    if (trigger || selected_mode == RC_mode::OFF || selected_mode == RC_mode::RECOVERY_STAND)
+    {
+        if (trigger)
+        {
+            printf("MODE TRIGGER!\n");
+        }
+        rc_control.mode = selected_mode;
+    }
 }
 
+void *v_memcpy(void *dest, volatile void *src, size_t n)
+{
+    void *src_2 = (void *)src;
+    return memcpy(dest, src_2, n);
 }
 
-void *v_memcpy(void *dest, volatile void *src, size_t n) {
-  void *src_2 = (void *)src;
-  return memcpy(dest, src_2, n);
+float deadband(float command, float deadbandRegion, float minVal, float maxVal)
+{
+    if (command < deadbandRegion && command > -deadbandRegion)
+    {
+        return 0.0;
+    }
+    else
+    {
+        return (command / (2)) * (maxVal - minVal);
+    }
 }
-
-float deadband(float command, float deadbandRegion, float minVal, float maxVal){
-  if (command < deadbandRegion && command > -deadbandRegion) {
-    return 0.0;
-  } else {
-    return (command / (2)) * (maxVal - minVal);
-  }
-}
-

@@ -204,6 +204,15 @@ FSM_StateName FSM_State_RLJointPD<T>::checkTransition() {
     case K_RL_JOINT_PD:
       break;
 
+      // case K_BALANCE_STAND:
+      //   // Requested change to BALANCE_STAND
+      //   this->nextStateName = FSM_StateName::BALANCE_STAND;
+
+      //   // Transition time is immediate
+      //   this->transitionDuration = 0.0;
+
+      //   break;
+
     case K_JOINT_PD:
       // Normal operation for state based transitions
       this->nextStateName = FSM_StateName::JOINT_PD;
