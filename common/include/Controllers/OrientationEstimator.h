@@ -37,6 +37,9 @@ class VectorNavOrientationEstimator : public GenericEstimator<T> {
  protected:
   bool _b_first_visit = true;
   Quat<T> _ori_ini_inv;
+//    rs2::pipeline pipe;
+//    rs2::config cfg;
+   long pipe_cout;
 };
 
 

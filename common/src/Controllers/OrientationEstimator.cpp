@@ -57,8 +57,37 @@ void VectorNavOrientationEstimator<T>::run() {
     rpy_ini[1] = 0;
     _ori_ini_inv = rpyToQuat(-rpy_ini);
     _b_first_visit = false;
+
+//      cfg.enable_stream(RS2_STREAM_POSE, RS2_FORMAT_6DOF);
+//      // Start pipeline with chosen configuration
+//      pipe.start(cfg);
   }
-  this->_stateEstimatorData.result->orientation = 
+
+    pipe_cout++;
+   if(pipe_cout%4==0){
+    //    auto frames = pipe.wait_for_frames();
+    //    // Get a frame from the pose stream
+    //    auto f = frames.first_or_default(RS2_STREAM_POSE);
+    //    // Cast the frame to pose_frame and get its data
+    //    auto pose_data = f.as<rs2::pose_frame>().get_pose_data();
+       if(pipe_cout%40==0)
+       {
+           //四元数到真实对应
+        //    printf("T265: %.3f\t%.3f\t%.3f\t%.3f\n",pose_data.rotation.w,-pose_data.rotation.z,-pose_data.rotation.x,pose_data.rotation.y);
+           printf("IMU: %.3f\t%.3f\t%.3f\t%.3f\n",this->_stateEstimatorData.result->orientation[0],this->_stateEstimatorData.result->orientation[1],
+                  this->_stateEstimatorData.result->orientation[2],this->_stateEstimatorData.result->orientation[3]);
+           //角速度到真实对应
+        //    printf("T265: %.3f\t%.3f\t%.3f\n",-pose_data.angular_velocity.z,-pose_data.angular_velocity.x,pose_data.angular_velocity.y);
+        //    printf("IMU: %.3f\t%.3f\t%.3f\n",this->_stateEstimatorData.result->omegaBody[0],this->_stateEstimatorData.result->omegaBody[1],
+        //           this->_stateEstimatorData.result->omegaBody[2]);
+          //加速度不对，没对应起来
+        //    printf("T265: %.3f\t%.3f\t%.3f\n",-pose_data.acceleration.z,-pose_data.acceleration.x,pose_data.acceleration.y+9.8);
+           printf("IMU: %.3f\t%.3f\t%.3f\n",this->_stateEstimatorData.result->aBody[0],this->_stateEstimatorData.result->aBody[1],
+                  this->_stateEstimatorData.result->aBody[2]);
+       }
+  }
+
+  this->_stateEstimatorData.result->orientation =
     ori::quatProduct(_ori_ini_inv, this->_stateEstimatorData.result->orientation);
 
   this->_stateEstimatorData.result->rpy =
@@ -80,8 +109,19 @@ void VectorNavOrientationEstimator<T>::run() {
   this->_stateEstimatorData.result->aWorld =
       this->_stateEstimatorData.result->rBody.transpose() *
       this->_stateEstimatorData.result->aBody;
+   static int times_show(0);
+   times_show++;
+//   if(times_show%10==1)
+//   {
+//      printf("rpy:%.2f\t%.2f\t%.2f\n",this->_stateEstimatorData.result->rpy(0),this->_stateEstimatorData.result->rpy(1),
+//               this->_stateEstimatorData.result->rpy(2));
+//       printf("body rpy rate:%.2f\t%.2f\t%.2f\n",this->_stateEstimatorData.result->omegaBody(0),this->_stateEstimatorData.result->omegaBody(1),
+//              this->_stateEstimatorData.result->omegaBody(2));
+//       printf("body acc:%.2f\t%.2f\t%.2f\n",this->_stateEstimatorData.result->aBody(0),this->_stateEstimatorData.result->aBody(1),
+//              this->_stateEstimatorData.result->aBody(2));
+//       printf("-------------------------------------------------\n");
+//   }
 }
-
 
 template class CheaterOrientationEstimator<float>;
 template class CheaterOrientationEstimator<double>;

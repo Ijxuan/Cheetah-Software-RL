@@ -108,9 +108,13 @@ u16 mip_sdk_port_open(void **port_handle, int port_num, int baudrate)
 //#ifdef USE_USB_CONNECTION
  
  //all USB connections appear on ttyACM# 
+#ifdef USE_LordIMU
  strcat(port_name, "/dev/ttyACM");
 //
-//#else
+#endif
+#ifdef USE_SelfIMU
+  strcat(port_name, "/dev/ttyACM");
+#endif
 //
 // //USART connections occur on ttyS#
 // strcat(port_name, "/dev/ttyS");
@@ -130,9 +134,14 @@ u16 mip_sdk_port_open(void **port_handle, int port_num, int baudrate)
  //Check for an invalid handle
  if(local_port_handle == -1)
  {
-   printf("Unable to open com Port %s\n Errno = %i\n", port_name, errno);
 
+   printf("Unable to open com Port %s\n Errno = %i\n", port_name, errno);
+   local_port_handle = open(port_name, O_RDWR | O_NOCTTY); //再尝试一次打开
+     if(local_port_handle == -1) //仍然失败
+     {
+         printf("Unable to open com Port twice %s\n Errno = %i\n", port_name, errno);
   return MIP_USER_FUNCTION_ERROR;
+     }
  }
  printf("Port: %s opened successfully.\n",port_name);
  
@@ -237,13 +246,12 @@ u16 mip_sdk_port_open(void **port_handle, int port_num, int baudrate)
   break;
 
 # endif
-
-# ifdef B460800
+//# ifdef B460800
  case 460800:
   hardware_bit_baud = B460800;
   break;
 
-# endif
+//# endif
 
 # ifdef B500000
  case 500000:
