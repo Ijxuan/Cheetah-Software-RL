@@ -141,14 +141,16 @@ void FSM_State_RLJointPD<T>::run() {
     if (command_.norm() < 0.3) command_.setZero();
   }
 
-  double kneeGearRatio = 9.33 / 6.;
+  // double kneeGearRatio = 9.33 / 6.;
   bool isMinicheetah = true;  
   /// TODO: true for the real robot, false for the simulation test
 
   if (isMinicheetah) {
-    this->kpMat = Vec3<T>(17, 17, 17 / (kneeGearRatio * kneeGearRatio)).asDiagonal();
-    this->kdMat = Vec3<T>(0.4, 0.4, 0.4 / (kneeGearRatio * kneeGearRatio)).asDiagonal();
-  }
+    // this->kpMat = Vec3<T>(17, 17, 17 / (kneeGearRatio * kneeGearRatio)).asDiagonal();
+    // this->kdMat = Vec3<T>(0.4, 0.4, 0.4 / (kneeGearRatio * kneeGearRatio)).asDiagonal();
+    this->kpMat = Vec3<T>(17, 17, 17).asDiagonal();
+    this->kdMat = Vec3<T>(0.4, 0.4, 0.4).asDiagonal();
+    }
   else {
     this->kpMat = Vec3<T>(17, 17, 17).asDiagonal();
     this->kdMat = Vec3<T>(0.4, 0.4, 0.4).asDiagonal();
@@ -340,12 +342,12 @@ template <typename T>
 void FSM_State_RLJointPD<T>::updateObservation() {
   // contact estimation
   // by using threshold
-  double contactThreshold = -0.4;
+  double contactThreshold = 0.f;
   Vec4<T> isContact; isContact.setZero();
   isContact << ((pTarget12_(2) - _jointQ(2)) < contactThreshold),
       ((pTarget12_(5) - _jointQ(5)) < contactThreshold),
       ((pTarget12_(8) - _jointQ(8)) < contactThreshold),
-      ((pTarget12_(1) - _jointQ(11)) < contactThreshold);
+      ((pTarget12_(11) - _jointQ(11)) < contactThreshold);
 
   this->_data->_stateEstimator->setContactPhase(isContact);
 

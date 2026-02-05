@@ -74,16 +74,16 @@ void VectorNavOrientationEstimator<T>::run() {
        {
            //四元数到真实对应
         //    printf("T265: %.3f\t%.3f\t%.3f\t%.3f\n",pose_data.rotation.w,-pose_data.rotation.z,-pose_data.rotation.x,pose_data.rotation.y);
-           printf("IMU: %.3f\t%.3f\t%.3f\t%.3f\n",this->_stateEstimatorData.result->orientation[0],this->_stateEstimatorData.result->orientation[1],
-                  this->_stateEstimatorData.result->orientation[2],this->_stateEstimatorData.result->orientation[3]);
+        //    printf("IMU: %.3f\t%.3f\t%.3f\t%.3f\n",this->_stateEstimatorData.result->orientation[0],this->_stateEstimatorData.result->orientation[1],
+        //           this->_stateEstimatorData.result->orientation[2],this->_stateEstimatorData.result->orientation[3]);
            //角速度到真实对应
         //    printf("T265: %.3f\t%.3f\t%.3f\n",-pose_data.angular_velocity.z,-pose_data.angular_velocity.x,pose_data.angular_velocity.y);
         //    printf("IMU: %.3f\t%.3f\t%.3f\n",this->_stateEstimatorData.result->omegaBody[0],this->_stateEstimatorData.result->omegaBody[1],
         //           this->_stateEstimatorData.result->omegaBody[2]);
           //加速度不对，没对应起来
         //    printf("T265: %.3f\t%.3f\t%.3f\n",-pose_data.acceleration.z,-pose_data.acceleration.x,pose_data.acceleration.y+9.8);
-           printf("IMU: %.3f\t%.3f\t%.3f\n",this->_stateEstimatorData.result->aBody[0],this->_stateEstimatorData.result->aBody[1],
-                  this->_stateEstimatorData.result->aBody[2]);
+        //    printf("IMU: %.3f\t%.3f\t%.3f\n",this->_stateEstimatorData.result->aBody[0],this->_stateEstimatorData.result->aBody[1],
+        //           this->_stateEstimatorData.result->aBody[2]);
        }
   }
 

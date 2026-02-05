@@ -123,13 +123,17 @@ void LinearKFPositionVelocityEstimator<T>::run() {
     T trust = T(1);
     T phase = fmin(this->_stateEstimatorData.result->contactEstimate(i), T(1));
     //T trust_window = T(0.25);
-    T trust_window = T(0.2);
+    T trust_window = T(1.01);
 
     if (phase < trust_window) {
       trust = phase / trust_window;
     } else if (phase > (T(1) - trust_window)) {
       trust = (T(1) - phase) / trust_window;
     }
+    // if(this->_stateEstimatorData.result->contactEstimate(i)==1)
+    // {
+    //     trust=1;
+    // }
     //T high_suspect_number(1000);
     T high_suspect_number(100);
 
@@ -174,9 +178,11 @@ void LinearKFPositionVelocityEstimator<T>::run() {
     _P.block(2, 0, 16, 2).setZero();
     _P.block(0, 0, 2, 2) /= T(10);
   }
-
+// std::cout << "contact: " << this->_stateEstimatorData.result->contactEstimate.transpose() << std::endl;
+// std::cout << "trusts:   " << trusts.transpose() << std::endl;
   this->_stateEstimatorData.result->position = _xhat.block(0, 0, 3, 1);
   this->_stateEstimatorData.result->vWorld = _xhat.block(3, 0, 3, 1);
+//   this->_stateEstimatorData.result->vWorld[2]=0; // 限制z方向速度为0
   this->_stateEstimatorData.result->vBody =
       this->_stateEstimatorData.result->rBody *
       this->_stateEstimatorData.result->vWorld;

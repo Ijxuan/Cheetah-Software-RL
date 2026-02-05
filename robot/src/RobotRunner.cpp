@@ -80,8 +80,12 @@ void RobotRunner::init() {
 /**
  * Runs the overall robot control system by calling each of the major components
  * to run each of their respective steps.
+ *
  */
 void RobotRunner::run() {
+//    clock_gettime(CLOCK_MONOTONIC, &now); //当前到时间
+//   std::cout<<"timer"<< ((int64_t)(now.tv_nsec - _startTime.tv_nsec) + 1000000000 * (now.tv_sec - _startTime.tv_sec))/ 1.e6<<std::endl;
+
   // Run the state estimator step
   //_stateEstimator->run(cheetahMainVisualization);
   _stateEstimator->run();
@@ -110,7 +114,8 @@ void RobotRunner::run() {
       _robot_ctrl->Estop();
     }else {
       // Controller
-      if (!_jpos_initializer->IsInitialized(_legController)) {
+      if (0)// !_jpos_initializer->IsInitialized(_legController))
+          {
         Mat3<float> kpMat;
         Mat3<float> kdMat;
         // Update the jpos feedback gains
@@ -214,6 +219,14 @@ void RobotRunner::finalizeStep() {
   _lcm.publish("leg_control_command", &leg_control_command_lcm);
   _lcm.publish("leg_control_data", &leg_control_data_lcm);
   _lcm.publish("state_estimator", &state_estimator_lcm);
+
+    global_to_robot_lcmt.rpy[0] = state_estimator_lcm.rpy[0];
+    global_to_robot_lcmt.rpy[1] = state_estimator_lcm.rpy[1];
+    global_to_robot_lcmt.rpy[2] = state_estimator_lcm.rpy[2];
+    global_to_robot_lcmt.xyz[0] = state_estimator_lcm.p[0];
+    global_to_robot_lcmt.xyz[1] = state_estimator_lcm.p[1];
+    global_to_robot_lcmt.xyz[2] = state_estimator_lcm.p[2];
+  _lcm.publish("global_to_robot", &global_to_robot_lcmt);
   _iterations++;
 }
 

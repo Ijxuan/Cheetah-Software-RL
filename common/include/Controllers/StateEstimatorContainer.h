@@ -33,6 +33,7 @@ struct StateEstimate {
   Vec3<T> omegaWorld;
   Vec3<T> vWorld;
   Vec3<T> aBody, aWorld;
+  Vec3<T> rRemoterVelociy;
 
   void setLcm(state_estimator_lcmt& lcm_data) {
     for(int i = 0; i < 3; i++) {
@@ -42,6 +43,10 @@ struct StateEstimate {
       lcm_data.rpy[i] = rpy[i];
       lcm_data.omegaBody[i] = omegaBody[i];
       lcm_data.omegaWorld[i] = omegaWorld[i];
+      lcm_data.vRemoter[i]=rRemoterVelociy[i];
+      lcm_data.aBody[i] = aBody[i];
+      lcm_data.aWorld[i] =aWorld[i];
+
     }
 
     for(int i = 0; i < 4; i++) {
@@ -126,6 +131,10 @@ class StateEstimatorContainer {
    * Get the result
    */
   const StateEstimate<T>& getResult() { return *_data.result; }
+  void setRemoterVelocityResult(Vec3<T> rs) {
+      _data.result->rRemoterVelociy=rs;
+//      printf("remoterVelocity:%.2f\t%.2f\t%.2f\n",rs(0),rs(1),rs(2));
+  }
   StateEstimate<T> * getResultHandle() { return _data.result; }
 
   /*!

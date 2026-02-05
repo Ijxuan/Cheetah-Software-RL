@@ -298,66 +298,66 @@ void js_complete(int port)
     }
     if (rc_control.mode == RC_mode::RL_JOINT_PD)
     {
-        rc_control.v_des[0] = -1.0 * (float)map.ly / 32768; // 应该是前后速度
-        rc_control.v_des[1] = -1.0 * (float)map.lx / 32768; // 应该 是左右速度
+        rc_control.v_des[0] = -3.0* (float)map.ly / 32768; // 应该是前后速度
+        rc_control.v_des[1] = -0.5 * (float)map.lx / 32768; // 应该 是左右速度
         rc_control.v_des[2] = 0;
         rc_control.omega_des[0] = 0;
         rc_control.omega_des[1] = 0; // pitch，俯仰角度
-        rc_control.omega_des[2] = (float)map.rx / 32768;  // yaw *3.0旋转角度
+        rc_control.omega_des[2] =  -1.0 *(float)map.rx / 32768;  // yaw *3.0旋转角度
     }
 
-    if (rc_control.mode == RC_mode::LOCOMOTION)
-    { // 如果是运动模式
-        if (map.y)
-            js_gait = 9;
-        else if (map.x)
-            js_gait = 3;
-        else if (map.a)
-            js_gait = 2;
-        else if (map.b)
-            js_gait = 1; // 按下xyab调整步态模式
-        rc_control.variable[0] = js_gait;
-        rc_control.v_des[2] = 0;
-        rc_control.omega_des[0] = 0;
-        rc_control.rpy_des[0] = 0;
+    // if (rc_control.mode == RC_mode::LOCOMOTION)
+    // { // 如果是运动模式
+    //     if (map.y)
+    //         js_gait = 9;
+    //     else if (map.x)
+    //         js_gait = 3;
+    //     else if (map.a)
+    //         js_gait = 2;
+    //     else if (map.b)
+    //         js_gait = 1; // 按下xyab调整步态模式
+    //     rc_control.variable[0] = js_gait;
+    //     rc_control.v_des[2] = 0;
+    //     rc_control.omega_des[0] = 0;
+    //     rc_control.rpy_des[0] = 0;
 
-        if (remote_control == false)
-        {
-            rc_control.v_des[0] = -1.0 * (float)map.ly / 32768; // 应该是前后速度
-            rc_control.v_des[1] = -1.0 * (float)map.lx / 32768; // 应该 是左右速度
-            rc_control.omega_des[1] = -(float)map.ry / 32768;   // pitch，俯仰角度
-            rc_control.omega_des[2] = (float)map.rx / 32768;    // yaw *3.0旋转角度
-        }
-        else
-        {
-            // rc_control.v_des[0] = -1.0 * (float)joy_new.left_y / 32768; // 应该是前后速度
-            // rc_control.v_des[1] = -1.0 * (float)joy_new.left_x / 32768; // 应该 是左右速度
-            // rc_control.omega_des[2] = (float)joy_new.right_x / 32768;   // yaw *3.0旋转角度
+    //     if (remote_control == false)
+    //     {
+    //         rc_control.v_des[0] = -1.0 * (float)map.ly / 32768; // 应该是前后速度
+    //         rc_control.v_des[1] = -1.0 * (float)map.lx / 32768; // 应该 是左右速度
+    //         rc_control.omega_des[1] = -(float)map.ry / 32768;   // pitch，俯仰角度
+    //         rc_control.omega_des[2] = (float)map.rx / 32768;    // yaw *3.0旋转角度
+    //     }
+    //     else
+    //     {
+    //         // rc_control.v_des[0] = -1.0 * (float)joy_new.left_y / 32768; // 应该是前后速度
+    //         // rc_control.v_des[1] = -1.0 * (float)joy_new.left_x / 32768; // 应该 是左右速度
+    //         // rc_control.omega_des[2] = (float)joy_new.right_x / 32768;   // yaw *3.0旋转角度
 
-            // rc_control.v_des[0] = clamp( -1.0 * (double)joy_new.left_y / 32768  , -1.0, 1.0);                            // val = 100
-            // rc_control.v_des[1] = clamp( -1.0 * (double)joy_new.left_x / 32768 , -1.0, 1.0);                            // val = 100
-            // rc_control.omega_des[2]= clamp( (double)joy_new.right_x / 32768  , -0.3, 0.3);                            // val = 100
-        }
+    //         // rc_control.v_des[0] = clamp( -1.0 * (double)joy_new.left_y / 32768  , -1.0, 1.0);                            // val = 100
+    //         // rc_control.v_des[1] = clamp( -1.0 * (double)joy_new.left_x / 32768 , -1.0, 1.0);                            // val = 100
+    //         // rc_control.omega_des[2]= clamp( (double)joy_new.right_x / 32768  , -0.3, 0.3);                            // val = 100
+    //     }
 
-        if (map.lb)
-        {
-            if (map.yy < -30000)
-                rc_control.step_height = 0.8; // LB加十字键上下是调整步态抬腿高低
-            else if (map.yy > 30000)
-                rc_control.step_height = 0.3;
-        }
-        else
-        {
-            if (map.yy > 30000)
-                rc_control.height_variation = -0.6; // 十字键上下是调整机体高低
-            else if (map.yy < -30000)
-                rc_control.height_variation = 0;
-        }
-    }
-    else
-    {
-        remote_control = false; // 不是运动模式，默认不开启远程控制
-    }
+    //     if (map.lb)
+    //     {
+    //         if (map.yy < -30000)
+    //             rc_control.step_height = 0.8; // LB加十字键上下是调整步态抬腿高低
+    //         else if (map.yy > 30000)
+    //             rc_control.step_height = 0.3;
+    //     }
+    //     else
+    //     {
+    //         if (map.yy > 30000)
+    //             rc_control.height_variation = -0.6; // 十字键上下是调整机体高低
+    //         else if (map.yy < -30000)
+    //             rc_control.height_variation = 0;
+    //     }
+    // }
+    // else
+    // {
+    //     remote_control = false; // 不是运动模式，默认不开启远程控制
+    // }
     // printf("map.rb is %d\n",map.rb);//十字键左右是远程控制开关
     // if ((map.rb)==true&& remote_control = false)
     if (map.rb)
