@@ -5,26 +5,40 @@
 #include <stdlib.h>
 #include <time.h>
 #include <mutex>
-#include <SOEM/soem/ethercat.h>
-#include "SOEM/soem/ethercat.h"
-#include "SOEM/osal/osal.h"
-#include "SOEM/osal/linux/osal_defs.h"
-#include "rt/rt_ethercat.h"
+#include "soem/soem.h"
 #include "SimUtilities/ti_boardcontrol.h"
+
+// SOEM v2 exposes context-based ecx_* APIs. Keep existing call sites by
+// bridging to a single process-wide context.
+static ecx_contextt ec_context;
+
+#define ec_slave     (ec_context.slavelist)
+#define ec_slavecount (ec_context.slavecount)
+#define ec_group     (ec_context.grouplist)
+
+static int ec_init(const char* ifname) { return ecx_init(&ec_context, ifname); }
+static int ec_config_init(boolean) { return ecx_config_init(&ec_context); }
+static int ec_config_map(void* pIOmap) { return ecx_config_map_group(&ec_context, pIOmap, 0); }
+static boolean ec_configdc() { return ecx_configdc(&ec_context); }
+static uint16 ec_statecheck(uint16 slave, uint16 reqstate, int timeout) { return ecx_statecheck(&ec_context, slave, reqstate, timeout); }
+static int ec_writestate(uint16 slave) { return ecx_writestate(&ec_context, slave); }
+static int ec_readstate() { return ecx_readstate(&ec_context); }
+static int ec_send_processdata() { return ecx_send_processdata(&ec_context); }
+static int ec_receive_processdata(int timeout) { return ecx_receive_processdata(&ec_context, timeout); }
+static void ec_close() { ecx_close(&ec_context); }
 
 
 #define EC_TIMEOUTMON 500
+#define PROCESSDATA_INTERVAL_US 250
+#define OP_TIMEOUT_US (10 * 1000 * 1000)
+#define PREOP_PRIME_FRAMES 100
 
 static char IOmap[4096];
-static OSAL_THREAD_HANDLE thread1;
 static int expectedWKC;
-static boolean needlf;
 static volatile int wkc;
 static boolean inOP;
-static uint8 currentgroup = 0;
-
-//#define ADAPTER_NAME "eno1"
-#define ADAPTER_NAME "enp2s0"
+static bool ecat_initialized = false;
+static const char* kDefaultAdapter = "enp0s31f6";
 
 static void degraded_handler() {
   //shut of gpio enables
@@ -37,231 +51,103 @@ static void degraded_handler() {
   exit(0);
 }
 
-static int run_ethercat(const char *ifname) {
-  int i, oloop, iloop, chk;
-  needlf = FALSE;
-  inOP = FALSE;
+void rt_ethercat_init() { rt_ethercat_init(kDefaultAdapter); }
 
+void rt_ethercat_init(const char* ifname) {
+  const char* adapter = ifname ? ifname : kDefaultAdapter;
+  printf("[EtherCAT] Initializing EtherCAT on %s\n", adapter);
+  const int op_cycles = OP_TIMEOUT_US / PROCESSDATA_INTERVAL_US;
 
-  /* initialise SOEM, bind socket to ifname */
-  if (ec_init(ifname))
-  {
-    printf("[EtherCAT Init] Initialization on device %s succeeded.\n",ifname);
-    /* find and auto-config slaves */
+  int attempt = 0;
+  while (true) {
+    attempt++;
+    inOP = FALSE;
+    ecat_initialized = false;
+    wkc = 0;
 
-    if ( ec_config_init(FALSE) > 0 )
-    {
-      printf("[EtherCAT Init] %d slaves found and configured.\n",ec_slavecount);
-      if(ec_slavecount < 4)
-      {
-        printf("[RT EtherCAT] Warning: Expected %d legs, found %d.\n", 4, ec_slavecount);
+    if (!ec_init(adapter)) {
+      printf("[EtherCAT Error] No socket connection on %s.\n", adapter);
+      osal_usleep(1000000);
+      continue;
+    }
+
+    if (ec_config_init(FALSE) <= 0) {
+      printf("[EtherCAT Error] No slaves found.\n");
+      ec_close();
+      osal_usleep(1000000);
+      continue;
+    }
+
+    int dc_capable = 0;
+    for (int i = 1; i <= ec_slavecount; i++) {
+      ec_slavet* s = &ec_slave[i];
+      s->mbx_l = 0;
+      s->mbx_rl = 0;
+      if (s->hasdc) {
+        dc_capable++;
       }
+    }
 
-      ec_config_map(&IOmap);
+    ec_context.overlappedMode = TRUE;
+
+    if (ec_config_map(&IOmap) <= 0) {
+      printf("[EtherCAT Error] Failed to map process data.\n");
+      ec_close();
+      osal_usleep(1000000);
+      continue;
+    }
+
+    if (dc_capable > 0) {
       ec_configdc();
+    }
 
-      printf("[EtherCAT Init] Mapped slaves.\n");
-      /* wait for all slaves to reach SAFE_OP state */
-      ec_statecheck(0, EC_STATE_SAFE_OP,  EC_TIMEOUTSTATE * 4);
+    ec_statecheck(0, EC_STATE_SAFE_OP, OP_TIMEOUT_US);
 
-      for(int slave_idx = 0; slave_idx < ec_slavecount; slave_idx++) {
-        printf("[SLAVE %d]\n", slave_idx);
-        printf("  IN  %d bytes, %d bits\n", ec_slave[slave_idx].Ibytes, ec_slave[slave_idx].Ibits);
-        printf("  OUT %d bytes, %d bits\n", ec_slave[slave_idx].Obytes, ec_slave[slave_idx].Obits);
-        printf("\n");
-     }
+    expectedWKC = (ec_group[0].outputsWKC * 2) + ec_group[0].inputsWKC;
 
-      oloop = ec_slave[0].Obytes;
-      if ((oloop == 0) && (ec_slave[0].Obits > 0)) oloop = 1;
-      if (oloop > 8) oloop = 8;
-      iloop = ec_slave[0].Ibytes;
-      if ((iloop == 0) && (ec_slave[0].Ibits > 0)) iloop = 1;
-      if (iloop > 8) iloop = 8;
-
-      printf("[EtherCAT Init] segments : %d : %d %d %d %d\n",ec_group[0].nsegments ,ec_group[0].IOsegment[0],ec_group[0].IOsegment[1],ec_group[0].IOsegment[2],ec_group[0].IOsegment[3]);
-
-      printf("[EtherCAT Init] Requesting operational state for all slaves...\n");
-      expectedWKC = (ec_group[0].outputsWKC * 2) + ec_group[0].inputsWKC;
-      printf("[EtherCAT Init] Calculated workcounter %d\n", expectedWKC);
-      ec_slave[0].state = EC_STATE_OPERATIONAL;
-      /* send one valid process data to make outputs in slaves happy*/
+    for (int i = 0; i < PREOP_PRIME_FRAMES; i++) {
       ec_send_processdata();
-      ec_receive_processdata(EC_TIMEOUTRET);
-      /* request OP state for all slaves */
-      ec_writestate(0);
-      chk = 40;
-      /* wait for all slaves to reach OP state */
-      do
-      {
-        ec_send_processdata();
-        ec_receive_processdata(EC_TIMEOUTRET);
-        ec_statecheck(0, EC_STATE_OPERATIONAL, 50000);
-      }
-      while (chk-- && (ec_slave[0].state != EC_STATE_OPERATIONAL));
+      wkc = ec_receive_processdata(EC_TIMEOUTRET);
+      osal_usleep(PROCESSDATA_INTERVAL_US);
+    }
 
-      if (ec_slave[0].state == EC_STATE_OPERATIONAL )
-      {
-        printf("[EtherCAT Init] Operational state reached for all slaves.\n");
-        inOP = TRUE;
-        return 1;
+    ec_slave[0].state = EC_STATE_OPERATIONAL;
+    ec_writestate(0);
 
-      }
-      else
-      {
-        printf("[EtherCAT Error] Not all slaves reached operational state.\n");
-        ec_readstate();
+    int chk = op_cycles;
+    do {
+      ec_send_processdata();
+      wkc = ec_receive_processdata(EC_TIMEOUTRET);
+      ec_statecheck(0, EC_STATE_OPERATIONAL, PROCESSDATA_INTERVAL_US);
+      osal_usleep(PROCESSDATA_INTERVAL_US);
+    } while (chk-- && (ec_slave[0].state != EC_STATE_OPERATIONAL));
 
-        for(i = 1; i<=ec_slavecount ; i++)
-        {
-          if(ec_slave[i].state != EC_STATE_OPERATIONAL)
-          {
+    if (ec_slave[0].state == EC_STATE_OPERATIONAL) {
+      inOP = TRUE;
+      ecat_initialized = true;
+      printf("[EtherCAT] OP reached (attempt %d), WKC=%d\n", attempt, wkc);
+      return;
+    }
 
-            printf("[EtherCAT Error] Slave %d State=0x%2.2x StatusCode=0x%4.4x : %s\n",
-                    i, ec_slave[i].state, ec_slave[i].ALstatuscode, ec_ALstatuscode2string(ec_slave[i].ALstatuscode));
-          }
-        }
+    printf("[EtherCAT Error] OP not reached on attempt %d, state=0x%2.2x\n", attempt, ec_slave[0].state);
+    ec_readstate();
+    for (int i = 1; i <= ec_slavecount; i++) {
+      if (ec_slave[i].state != EC_STATE_OPERATIONAL) {
+        printf("[EtherCAT Error] Slave %d State=0x%2.2x StatusCode=0x%4.4x : %s\n",
+               i, ec_slave[i].state, ec_slave[i].ALstatuscode,
+               ec_ALstatuscode2string(ec_slave[i].ALstatuscode));
       }
     }
-    else
-    {
-      printf("[EtherCAT Error] No slaves found!\n");
-    }
+    ec_close();
+    osal_usleep(1000000);
   }
-  else
-  {
-    printf("[EtherCAT Error] No socket connection on %s - are you running run.sh?\n",ifname);
-  }
-  return 0;
 }
 
-static int err_count = 0;
-static int err_iteration_count = 0;
 /**@brief EtherCAT errors are measured over this period of loop iterations */
 #define K_ETHERCAT_ERR_PERIOD 100
 
 /**@brief Maximum number of etherCAT errors before a fault per period of loop iterations */
 #define K_ETHERCAT_ERR_MAX 20
-
-static OSAL_THREAD_FUNC ecatcheck( void *ptr )
-{
-  (void)ptr;
-  int slave = 0;
-  while(1)
-  {
-    //count errors
-    if(err_iteration_count > K_ETHERCAT_ERR_PERIOD)
-    {
-      err_iteration_count = 0;
-      err_count = 0;
-    }
-
-    if(err_count > K_ETHERCAT_ERR_MAX)
-    {
-      //possibly shut down
-      printf("[EtherCAT Error] EtherCAT connection degraded.\n");
-      printf("[Simulink-Linux] Shutting down....\n");
-      degraded_handler();
-      break;
-    }
-    err_iteration_count++;
-
-    if( inOP && ((wkc < expectedWKC) || ec_group[currentgroup].docheckstate))
-    {
-      if (needlf)
-      {
-        needlf = FALSE;
-        printf("\n");
-      }
-      /* one ore more slaves are not responding */
-      ec_group[currentgroup].docheckstate = FALSE;
-      ec_readstate();
-      for (slave = 1; slave <= ec_slavecount; slave++)
-      {
-        if ((ec_slave[slave].group == currentgroup) && (ec_slave[slave].state != EC_STATE_OPERATIONAL))
-        {
-          ec_group[currentgroup].docheckstate = TRUE;
-          if (ec_slave[slave].state == (EC_STATE_SAFE_OP + EC_STATE_ERROR))
-          {
-            printf("[EtherCAT Error] Slave %d is in SAFE_OP + ERROR, attempting ack.\n", slave);
-            ec_slave[slave].state = (EC_STATE_SAFE_OP + EC_STATE_ACK);
-            ec_writestate(slave);
-            err_count++;
-          }
-          else if(ec_slave[slave].state == EC_STATE_SAFE_OP)
-          {
-            printf("[EtherCAT Error] Slave %d is in SAFE_OP, change to OPERATIONAL.\n", slave);
-            ec_slave[slave].state = EC_STATE_OPERATIONAL;
-            ec_writestate(slave);
-            err_count++;
-          }
-          else if(ec_slave[slave].state > 0)
-          {
-            if (ec_reconfig_slave(slave, EC_TIMEOUTMON))
-            {
-              ec_slave[slave].islost = FALSE;
-              printf("[EtherCAT Status] Slave %d reconfigured\n",slave);
-            }
-          }
-          else if(!ec_slave[slave].islost)
-          {
-            /* re-check state */
-            ec_statecheck(slave, EC_STATE_OPERATIONAL, EC_TIMEOUTRET);
-            if (!ec_slave[slave].state)
-            {
-              ec_slave[slave].islost = TRUE;
-              printf("[EtherCAT Error] Slave %d lost\n",slave);
-              err_count++;
-            }
-          }
-        }
-        if (ec_slave[slave].islost)
-        {
-          if(!ec_slave[slave].state)
-          {
-            if (ec_recover_slave(slave, EC_TIMEOUTMON))
-            {
-              ec_slave[slave].islost = FALSE;
-              printf("[EtherCAT Status] Slave %d recovered\n",slave);
-            }
-          }
-          else
-          {
-            ec_slave[slave].islost = FALSE;
-            printf("[EtherCAT Status] Slave %d found\n",slave);
-          }
-        }
-      }
-      if(!ec_group[currentgroup].docheckstate)
-        printf("[EtherCAT Status] All slaves resumed OPERATIONAL.\n");
-    }
-    osal_usleep(50000);
-  }
-}
-
-void rt_ethercat_init()
-{
-
-  printf("[EtherCAT] Initializing EtherCAT\n");
-  //initialize monitoring thread
-  osal_thread_create((void*)&thread1, 128000, (void*)&ecatcheck, (void*) &ctime);
-
-  //try initialization until it succeeds
-  int i;
-  int rc;
-  for(i = 1; i < 100; i++)
-  {
-    printf("[EtherCAT] Attempting to start EtherCAT, try %d of 100.\n", i);
-    rc = run_ethercat(ADAPTER_NAME); // todo?
-    if(rc) break;
-    osal_usleep(1000000);
-  }
-  if(rc) printf("[EtherCAT] EtherCAT successfully initialized on attempt %d \n", i);
-  else
-  {
-    printf("[EtherCAT Error] Failed to initialize EtherCAT after 100 tries. \n");
-  }
-  
-}
 
 static int wkc_err_count = 0;
 static int wkc_err_iteration_count = 0;
@@ -276,6 +162,12 @@ static std::mutex command_mutex, data_mutex;
  */
 void rt_ethercat_run()
 {
+  if(!ecat_initialized || !inOP)
+  {
+    printf("[EtherCAT Error] rt_ethercat_run called before OP-ready initialization.\n");
+    degraded_handler();
+  }
+
   //check connection
   if(wkc_err_iteration_count > K_ETHERCAT_ERR_PERIOD)
   {

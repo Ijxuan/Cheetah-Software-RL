@@ -5,6 +5,7 @@
 
 void rt_ethercat_init();
 void rt_ethercat_run();
+void rt_ethercat_init(const char* ifname);
 
 struct TiBoardData;
 struct TiBoardCommand;

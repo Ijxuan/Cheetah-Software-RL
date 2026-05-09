@@ -312,9 +312,14 @@ void MiniCheetahHardwareBridge::run() {
   statusTask.start();
 
   // spi Task start
-  PeriodicMemberFunction<MiniCheetahHardwareBridge> spiTask(
-      &taskManager, .002, "spi", &MiniCheetahHardwareBridge::runSpi, this);
-  spiTask.start();
+  // PeriodicMemberFunction<MiniCheetahHardwareBridge> spiTask(
+  //     &taskManager, .002, "spi", &MiniCheetahHardwareBridge::runSpi, this);
+  // spiTask.start();
+
+  // EtherCAT task (replace SPI communication loop, 250us period)
+  PeriodicMemberFunction<MiniCheetahHardwareBridge> ecatTask(
+      &taskManager, .00025, "ecat-mini", &MiniCheetahHardwareBridge::runSpi, this);
+  ecatTask.start();
 
   // microstrain
   if(_microstrainInit)
@@ -393,7 +398,8 @@ void MiniCheetahHardwareBridge::initHardware() {
   }
 #endif
 
-  init_spi();
+  // init_spi();
+  rt_ethercat_init("enp0s31f6");
 
   _microstrainInit = _microstrainImu.tryInit(0, 460800);//921600); // lord设置921600,        ttyUSB0
 
@@ -417,15 +423,64 @@ void Cheetah3HardwareBridge::initHardware() {
  * Run Mini Cheetah SPI
  */
 void MiniCheetahHardwareBridge::runSpi() {
-  spi_command_t* cmd = get_spi_command();
-  spi_data_t* data = get_spi_data();
+  // spi_command_t* cmd = get_spi_command();
+  // spi_data_t* data = get_spi_data();
+  //
+  // memcpy(cmd, &_spiCommand, sizeof(spi_command_t));
+  // spi_driver_run();
+  // memcpy(&_spiData, data, sizeof(spi_data_t));
+  //
+  // _spiLcm.publish("spi_data", data);
+  // _spiLcm.publish("spi_command", cmd);
 
-  memcpy(cmd, &_spiCommand, sizeof(spi_command_t));
-  spi_driver_run();
-  memcpy(&_spiData, data, sizeof(spi_data_t));
+  for (int leg = 0; leg < 4; leg++) {
+    for (int axis = 0; axis < 3; axis++) {
+      _tiBoardCommand[leg].position_des[axis] = 0.f;
+      _tiBoardCommand[leg].velocity_des[axis] = 0.f;
+      _tiBoardCommand[leg].kp[axis] = 0.f;
+      _tiBoardCommand[leg].kd[axis] = 0.f;
+      _tiBoardCommand[leg].force_ff[axis] = 0.f;
+      _tiBoardCommand[leg].zero_offset[axis] = 0.f;
+    }
 
-  _spiLcm.publish("spi_data", data);
-  _spiLcm.publish("spi_command", cmd);
+    _tiBoardCommand[leg].q_des[0] = _spiCommand.q_des_abad[leg];
+    _tiBoardCommand[leg].q_des[1] = _spiCommand.q_des_hip[leg];
+    _tiBoardCommand[leg].q_des[2] = _spiCommand.q_des_knee[leg];
+    _tiBoardCommand[leg].qd_des[0] = _spiCommand.qd_des_abad[leg];
+    _tiBoardCommand[leg].qd_des[1] = _spiCommand.qd_des_hip[leg];
+    _tiBoardCommand[leg].qd_des[2] = _spiCommand.qd_des_knee[leg];
+    _tiBoardCommand[leg].kp_joint[0] = _spiCommand.kp_abad[leg];
+    _tiBoardCommand[leg].kp_joint[1] = _spiCommand.kp_hip[leg];
+    _tiBoardCommand[leg].kp_joint[2] = _spiCommand.kp_knee[leg];
+    _tiBoardCommand[leg].kd_joint[0] = _spiCommand.kd_abad[leg];
+    _tiBoardCommand[leg].kd_joint[1] = _spiCommand.kd_hip[leg];
+    _tiBoardCommand[leg].kd_joint[2] = _spiCommand.kd_knee[leg];
+    _tiBoardCommand[leg].tau_ff[0] = _spiCommand.tau_abad_ff[leg];
+    _tiBoardCommand[leg].tau_ff[1] = _spiCommand.tau_hip_ff[leg];
+    _tiBoardCommand[leg].tau_ff[2] = _spiCommand.tau_knee_ff[leg];
+    _tiBoardCommand[leg].enable = (_spiCommand.flags[leg] != 0) ? 1 : 0;
+    _tiBoardCommand[leg].zero = 0;
+    _tiBoardCommand[leg].max_torque = 208.5f;
+  }
+
+  rt_ethercat_set_command(_tiBoardCommand);
+  rt_ethercat_run();
+  rt_ethercat_get_data(_tiBoardData);
+
+  for (int leg = 0; leg < 4; leg++) {
+    _spiData.q_abad[leg] = _tiBoardData[leg].q[0];
+    _spiData.q_hip[leg] = _tiBoardData[leg].q[1];
+    _spiData.q_knee[leg] = _tiBoardData[leg].q[2];
+    _spiData.qd_abad[leg] = _tiBoardData[leg].dq[0];
+    _spiData.qd_hip[leg] = _tiBoardData[leg].dq[1];
+    _spiData.qd_knee[leg] = _tiBoardData[leg].dq[2];
+    _spiData.flags[leg] = _tiBoardData[leg].loop_count_ti;
+  }
+
+  // SPI LCM message types are spi_data_t/spi_command_t.
+  // Keep these channels disabled during EtherCAT transition.
+  // _spiLcm.publish("spi_data", &_spiData);
+  // _spiLcm.publish("spi_command", &_spiCommand);
 }
 
 void Cheetah3HardwareBridge::runEcat() {
