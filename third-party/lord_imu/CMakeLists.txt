@@ -1,7 +1,9 @@
 include_directories(Include)
 
 include_directories("../../common/include/")
-
+include_directories(
+  ${CMAKE_SOURCE_DIR}/lcm-types/cpp
+)
 add_library(lord_imu SHARED
         Source/mip.c
         Source/mip_sdk_3dm.c

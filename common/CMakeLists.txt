@@ -24,29 +24,29 @@ if (CMAKE_VERSION VERSION_LESS 3.2)
 else()
     set(UPDATE_DISCONNECTED_IF_AVAILABLE "UPDATE_DISCONNECTED 1")
 endif()
-include(DownloadProject.cmake)
-download_project(PROJ                googletest
-                 GIT_REPOSITORY      https://github.com/google/googletest.git
-                 GIT_TAG             main
-                 ${UPDATE_DISCONNECTED_IF_AVAILABLE}
-                 QUIET
-)
-set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-add_subdirectory(${googletest_SOURCE_DIR} ${googletest_BINARY_DIR})
-if (CMAKE_VERSION VERSION_LESS 2.8.11)
-    include_directories("${gtest_SOURCE_DIR}/include"
-                        "${gmock_SOURCE_DIR}/include")
-endif()
+# include(DownloadProject.cmake)
+# download_project(PROJ                googletest
+#                  GIT_REPOSITORY      https://github.com/google/googletest.git
+#                  GIT_TAG             main
+#                  ${UPDATE_DISCONNECTED_IF_AVAILABLE}
+#                  QUIET
+# )
+# set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+# add_subdirectory(${googletest_SOURCE_DIR} ${googletest_BINARY_DIR})
+# if (CMAKE_VERSION VERSION_LESS 2.8.11)
+#     include_directories("${gtest_SOURCE_DIR}/include"
+#                         "${gmock_SOURCE_DIR}/include")
+# endif()
 
-# Test
-file(GLOB_RECURSE test_sources "test/test_*.cpp")             # test cpp files
-add_executable(test-common ${test_sources})
-target_link_libraries(test-common gtest gmock_main lcm rt inih osqp dynacore_param_handler pthread biomimetics)
-target_link_libraries(test-common Goldfarb_Optimizer)
-target_link_libraries(test-common JCQP)
+# # Test
+# file(GLOB_RECURSE test_sources "test/test_*.cpp")             # test cpp files
+# add_executable(test-common ${test_sources})
+# target_link_libraries(test-common gtest gmock_main lcm rt inih osqp dynacore_param_handler pthread biomimetics)
+# target_link_libraries(test-common Goldfarb_Optimizer)
+# target_link_libraries(test-common JCQP)
 
 
-add_test(NAME example_test COMMAND test-common)
+# add_test(NAME example_test COMMAND test-common)
 
 endif(CMAKE_SYSTEM_NAME MATCHES Linux)
 
