@@ -6,6 +6,7 @@
 #include <time.h>
 #include <mutex>
 #include "soem/soem.h"
+#include "rt/mit_motor_protocol.h"
 #include "SimUtilities/ti_boardcontrol.h"
 
 // SOEM v2 exposes context-based ecx_* APIs. Keep existing call sites by
@@ -33,12 +34,89 @@ static void ec_close() { ecx_close(&ec_context); }
 #define OP_TIMEOUT_US (10 * 1000 * 1000)
 #define PREOP_PRIME_FRAMES 100
 
+#define CAN_CHANNEL_COUNT 4
+#define CAN_CHANNEL_SIZE 75
+#define CAN_DLC_FIXED 8
+#define CAN_DATA_LEN_FIXED 8
+
 static char IOmap[4096];
 static int expectedWKC;
 static volatile int wkc;
 static boolean inOP;
 static bool ecat_initialized = false;
 static const char* kDefaultAdapter = "enp0s31f6";
+static const uint16 g_channel_offsets[CAN_CHANNEL_COUNT] = {0, 75, 150, 225};
+static uint8_t g_leg_motor_rr_idx[CAN_CHANNEL_COUNT] = {0, 0, 0, 0};
+
+static void write_u32_le(uint8 *dst, uint32 value) {
+  dst[0] = (uint8)(value & 0xFFU);
+  dst[1] = (uint8)((value >> 8) & 0xFFU);
+  dst[2] = (uint8)((value >> 16) & 0xFFU);
+  dst[3] = (uint8)((value >> 24) & 0xFFU);
+}
+
+static uint32 read_u32_le(const uint8 *src) {
+  return (uint32)src[0] |
+         ((uint32)src[1] << 8) |
+         ((uint32)src[2] << 16) |
+         ((uint32)src[3] << 24);
+}
+
+static int get_channel_offset(int channel, uint16 *offset) {
+  if ((channel < 1) || (channel > CAN_CHANNEL_COUNT)) {
+    return 0;
+  }
+  *offset = g_channel_offsets[channel - 1];
+  return 1;
+}
+
+static int can_send_fixed8(ec_slavet *slave, int channel, uint32 can_id,
+                           const uint8 data[CAN_DATA_LEN_FIXED]) {
+  uint16 offset = 0;
+  uint8 *base = NULL;
+
+  if ((slave == NULL) || (data == NULL) || (slave->outputs == NULL)) {
+    return 0;
+  }
+  if (!get_channel_offset(channel, &offset)) {
+    return 0;
+  }
+  if (slave->Obytes < (uint32)(offset + CAN_CHANNEL_SIZE)) {
+    return 0;
+  }
+
+  base = slave->outputs + offset;
+  memset(base, 0x00, CAN_CHANNEL_SIZE);
+  write_u32_le(base, can_id);                  // 0~3: CAN ID
+  base[4] = CAN_DLC_FIXED;                     // 4: DLC
+  memcpy(&base[5], data, CAN_DATA_LEN_FIXED);  // 5~12: 有效负载 8 字节
+  return 1;
+}
+
+static int can_recv_fixed8(const ec_slavet *slave, int channel, uint32 *can_id,
+                           uint8 data[CAN_DATA_LEN_FIXED]) {
+  uint16 offset = 0;
+  const uint8 *base = NULL;
+
+  if ((slave == NULL) || (can_id == NULL) || (data == NULL) || (slave->inputs == NULL)) {
+    return 0;
+  }
+  if (!get_channel_offset(channel, &offset)) {
+    return 0;
+  }
+  if (slave->Ibytes < (uint32)(offset + CAN_CHANNEL_SIZE)) {
+    return 0;
+  }
+
+  base = slave->inputs + offset;
+  if (base[4] != CAN_DLC_FIXED) {
+    return 0;
+  }
+
+  *can_id = read_u32_le(base);
+  memcpy(data, &base[5], CAN_DATA_LEN_FIXED);
+  return 1;
+}
 
 static void degraded_handler() {
   //shut of gpio enables
@@ -202,20 +280,54 @@ void rt_ethercat_run()
 
 void rt_ethercat_get_data(TiBoardData* data) {
   data_mutex.lock();
-  for(int slave = 0; slave < 4; slave++) {
-    TiBoardData* slave_src = (TiBoardData*)(ec_slave[slave + 1].inputs);
-    if(slave_src)
-      data[slave] = *(TiBoardData*)(ec_slave[slave + 1].inputs);
-  }
-  data_mutex.unlock();
 
+  if (data == nullptr || ec_slavecount < 1) {
+    data_mutex.unlock();
+    return;
+  }
+
+  const ec_slavet* slave = &ec_slave[1];
+  for (int leg = 0; leg < CAN_CHANNEL_COUNT; leg++) {
+    uint32 can_id = 0;
+    uint8 can_data[CAN_DATA_LEN_FIXED] = {0};
+    memset(&data[leg], 0, sizeof(TiBoardData));
+    if (can_recv_fixed8(slave, leg + 1, &can_id, can_data)) {
+      data[leg].loop_count_ti = can_id;
+      data[leg].ethercat_count_ti = read_u32_le(can_data);
+      data[leg].microtime_ti = read_u32_le(can_data + 4);
+    }
+  }
+
+  data_mutex.unlock();
 }
+
 void rt_ethercat_set_command(TiBoardCommand* command) {
   command_mutex.lock();
-  for(int slave = 0; slave < 4; slave++) {
-    TiBoardCommand* slave_dest = (TiBoardCommand*)(ec_slave[slave + 1].outputs);
-    if(slave_dest)
-      *(TiBoardCommand*)(ec_slave[slave + 1].outputs) = command[slave];
+
+  if (command != nullptr && ec_slavecount >= 1) {
+    ec_slavet* slave = &ec_slave[1];
+    for (int leg = 0; leg < CAN_CHANNEL_COUNT; leg++) {
+      uint8 can_data[CAN_DATA_LEN_FIXED] = {0};
+      uint32 can_id = mit_motor_protocol::kJointCanIds[0];
+
+      const int joint = g_leg_motor_rr_idx[leg] % mit_motor_protocol::kJointCountPerLeg;
+      g_leg_motor_rr_idx[leg] =
+          static_cast<uint8_t>((g_leg_motor_rr_idx[leg] + 1) % mit_motor_protocol::kJointCountPerLeg);
+
+      const TiBoardCommand& leg_cmd = command[leg];
+      can_id = mit_motor_protocol::kJointCanIds[joint];
+
+      if (leg_cmd.enable) {
+        mit_motor_protocol::pack_control_command(
+            leg_cmd.q_des[joint], leg_cmd.qd_des[joint], leg_cmd.kp_joint[joint],
+            leg_cmd.kd_joint[joint], leg_cmd.tau_ff[joint], can_data);
+      } else {
+        mit_motor_protocol::pack_control_command(0.f, 0.f, 0.f, 0.f, 0.f, can_data);
+      }
+
+      can_send_fixed8(slave, leg + 1, can_id, can_data);
+    }
   }
+
   command_mutex.unlock();
 }
