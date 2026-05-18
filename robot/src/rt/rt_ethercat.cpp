@@ -31,7 +31,7 @@ static void ec_close() { ecx_close(&ec_context); }
 
 
 #define EC_TIMEOUTMON 500
-#define PROCESSDATA_INTERVAL_US 250
+#define PROCESSDATA_INTERVAL_US 10000
 #define OP_TIMEOUT_US (10 * 1000 * 1000)
 #define PREOP_PRIME_FRAMES 100
 
@@ -44,22 +44,23 @@ static void ec_close() { ecx_close(&ec_context); }
 #define ECAT_ENABLE_MOTOR_FEEDBACK_LOG 0
 #endif
 
-static char IOmap[4096];
-static int expectedWKC;
-static volatile int wkc;
-static boolean inOP;
-static bool ecat_initialized = false;
+static char IOmap[4096];                 // SOEM 过程数据映射区（主站PDO内存镜像）
+static int expectedWKC;                  // 期望工作计数值（用于链路健康检查）
+static volatile int wkc;                 // 当前周期实际工作计数值
+static boolean inOP;                     // EtherCAT 网络是否已进入 OP 状态
+static bool ecat_initialized = false;    // EtherCAT 初始化是否完成
 // Single source of truth for EtherCAT NIC name.
 // Change only this value when switching network adapters.
 static const char* kDefaultAdapter = "enp86s0";
-static const uint16 g_channel_offsets[CAN_CHANNEL_COUNT] = {0, 75, 150, 225};
-static uint8_t g_joint_rr_phase __attribute__((unused)) = 0;
-static TiBoardData g_latest_board_data[CAN_CHANNEL_COUNT];
-static bool g_board_data_inited = false;
-static bool g_shutdown_hook_registered = false;
-static bool g_motor_mode_first_run = true;
-static std::mutex command_mutex, data_mutex;
-static bool g_feedback_monitor_active = false;
+static const uint16 g_channel_offsets[CAN_CHANNEL_COUNT] = {0, 75, 150, 225};  // 4路CAN在从站PDO内的偏移
+static uint8_t g_joint_rr_phase __attribute__((unused)) = 0;                    // 关节轮转发送阶段（控制发送被注释后保留）
+static TiBoardData g_latest_board_data[CAN_CHANNEL_COUNT];                      // 每条CAN通道最近一次聚合后的关节状态缓存
+static bool g_board_data_inited = false;                                        // 状态缓存是否已清零初始化
+static bool g_shutdown_hook_registered = false;                                 // 退出钩子（atexit）是否已注册
+static bool g_motor_mode_first_run = true;                                      // OP后首次循环标记：用于先发使能帧
+static std::mutex command_mutex, data_mutex;                                    // 命令区/数据区互斥锁
+static bool g_feedback_monitor_active = false;                                  // 电机回报统计监控开关
+static uint64_t g_lf_q_print_last_ns = 0;                                       // 左前腿关节角打印上次时间戳（1Hz打印）
 
 #if ECAT_ENABLE_MOTOR_FEEDBACK_LOG
 static uint32_t g_feedback_rx_count_1s[CAN_CHANNEL_COUNT][mit_motor_protocol::kJointCountPerLeg];
@@ -114,6 +115,31 @@ static int decode_mit_feedback(const uint8 data[CAN_DATA_LEN_FIXED], int* joint,
   *dq = uint_to_float(v_uint, kMitVMin, kMitVMax, 12);
   *tau = uint_to_float(t_uint, kMitTMin, kMitTMax, 12);
   return 1;
+}
+
+static uint64_t monotonic_time_ns_always() {
+  timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static void print_left_front_q_once_per_sec(const TiBoardData* data) {
+  if (data == NULL) {
+    return;
+  }
+
+  // Leg index mapping used in this file: 0=FR, 1=FL, 2=RR, 3=RL.
+  constexpr int kLeftFrontLegIdx = 1;
+  const uint64_t now_ns = monotonic_time_ns_always();
+  if (g_lf_q_print_last_ns != 0 &&
+      (now_ns - g_lf_q_print_last_ns) < 1000000000ULL) {
+    return;
+  }
+
+  g_lf_q_print_last_ns = now_ns;
+  printf("[EtherCAT] LF q(rad): %.6f %.6f %.6f\n",
+         data[kLeftFrontLegIdx].q[0], data[kLeftFrontLegIdx].q[1],
+         data[kLeftFrontLegIdx].q[2]);
 }
 
 #if ECAT_ENABLE_MOTOR_FEEDBACK_LOG
@@ -251,53 +277,56 @@ static int can_recv_fixed8(const ec_slavet *slave, int channel, uint32 *can_id,
   memcpy(data, &base[5], CAN_DATA_LEN_FIXED);
   return 1;
 }
+// 发送ID轮转槽位：0->ID1, 1->ID2, 2->ID3，然后回到0。
+// static int g_motor_slot = 0;
 
-static void print_tx_frame(const char* prefix, uint32 can_id,
-                           const uint8 data[CAN_DATA_LEN_FIXED]) {
-  printf("%s ID=0x%08" PRIX32 " DATA=", prefix, can_id);
-  for (int i = 0; i < CAN_DATA_LEN_FIXED; i++) {
-    printf("%02X", data[i]);
-    if (i + 1 < CAN_DATA_LEN_FIXED) {
-      printf(" ");
-    }
-  }
-  printf("\n");
-}
+// static void print_tx_frame(const char* prefix, uint32 can_id,
+//                            const uint8 data[CAN_DATA_LEN_FIXED]) {
+//   printf("%s ID=0x%08" PRIX32 " DATA=", prefix, can_id);
+//   for (int i = 0; i < CAN_DATA_LEN_FIXED; i++) {
+//     printf("%02X", data[i]);
+//     if (i + 1 < CAN_DATA_LEN_FIXED) {
+//       printf(" ");
+//     }
+//   }
+//   printf("\n");
+// }
 
-static void send_raw_frame_all_motors(const uint8 data[CAN_DATA_LEN_FIXED], int full_sweeps,
-                                      const char* tag) {
-  if (data == NULL || full_sweeps <= 0 || ec_slavecount < 1 || !ecat_initialized || !inOP) {
-    return;
-  }
+// 固定场景发送函数：
+// 1 个 EtherCAT 从站，4 条 CAN（对应 4 条腿），每条 CAN 上 3 个电机 ID（1/2/3）。
+// 每次调用只发送 1 个 ID（1/2/3 中之一）到 4 条 CAN 通道。
+// 调用次数决定发几次；ID按 1->2->3->1... 自动轮转。
+// static void send_same_frame_to_all_12_motors(const uint8 data[CAN_DATA_LEN_FIXED],
+//                                              const char* tag) {
+//   if (data == NULL || ec_slavecount < 1 || !ecat_initialized || !inOP) {
+//     return;
+//   }
 
-  ec_slavet* slave = &ec_slave[1];
-  for (int sweep = 0; sweep < full_sweeps; sweep++) {
-    for (int joint = 0; joint < mit_motor_protocol::kJointCountPerLeg; joint++) {
-      const uint32 can_id = mit_motor_protocol::kJointCanIds[joint];
-      for (int leg = 0; leg < CAN_CHANNEL_COUNT; leg++) {
-        can_send_fixed8(slave, leg + 1, can_id, data);
-        if (leg == 0 && can_id == 0x01U) {
-          print_tx_frame("[EtherCAT] TX motor1", can_id, data);
-        }
-      }
-      ec_send_processdata();
-      wkc = ec_receive_processdata(EC_TIMEOUTRET);
-      osal_usleep(PROCESSDATA_INTERVAL_US);
-    }
-  }
+//   ec_slavet* slave = &ec_slave[1];
+//   const uint32 can_id = mit_motor_protocol::kJointCanIds[g_motor_slot];
+//   for (int leg = 0; leg < 4; leg++) {
+//     can_send_fixed8(slave, leg + 1, can_id, data);
+//     if (leg == 0) {
+//       print_tx_frame("[EtherCAT] TX motor1", can_id, data);
+//     }
+//   }
 
-  if (tag != NULL) {
-    printf("[EtherCAT] %s done (sweeps=%d)\n", tag, full_sweeps);
-  }
-}
+//   ec_send_processdata();
+//   wkc = ec_receive_processdata(EC_TIMEOUTRET);
+//   g_motor_slot = (g_motor_slot + 1) % mit_motor_protocol::kJointCountPerLeg;
+
+//   if (tag != NULL) {
+//     printf("[EtherCAT] %s done (next_slot=%d)\n", tag, g_motor_slot);
+//   }
+// }
 
 static void rt_ethercat_shutdown() {
-  command_mutex.lock();
-  if (ecat_initialized && inOP && ec_slavecount >= 1) {
-    const uint8 zero_frame[CAN_DATA_LEN_FIXED] = {0};
-    send_raw_frame_all_motors(zero_frame, 3, "sent zero frame to all motors");
-  }
-  command_mutex.unlock();
+  // command_mutex.lock();
+  // if (ecat_initialized && inOP && ec_slavecount >= 1) {
+  //   const uint8 zero_frame[CAN_DATA_LEN_FIXED] = {0};
+  //   send_same_frame_to_all_12_motors(zero_frame, "sent zero frame to all motors");
+  // }
+  // command_mutex.unlock();
 
   inOP = FALSE;
   ecat_initialized = false;
@@ -437,6 +466,8 @@ static int wkc_err_iteration_count = 0;
  * In Simulation, send data over LCM
  * On the robt, verify the EtherCAT connection is still healthy, send data, receive data, and check for lost packets
  */
+  int run_times=0;
+
 void rt_ethercat_run()
 {
   if(!ecat_initialized || !inOP)
@@ -459,16 +490,22 @@ void rt_ethercat_run()
   }
 
   // First cyclic run after OP: send motor-mode frame to all motors once.
-  if (g_motor_mode_first_run) {
-    const uint8 motor_mode_frame[CAN_DATA_LEN_FIXED] = {
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC};
-    command_mutex.lock();
-    send_raw_frame_all_motors(motor_mode_frame, 3,
-                              "sent motor-mode frame to all motors");
-    command_mutex.unlock();
-    g_motor_mode_first_run = false;
-  }
-else{
+//   if (g_motor_mode_first_run) {
+//     const uint8 motor_mode_frame[CAN_DATA_LEN_FIXED] = {
+//         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC};
+//     command_mutex.lock();
+//     send_same_frame_to_all_12_motors(motor_mode_frame,
+//                                      "sent motor-mode frame to all motors");
+//     command_mutex.unlock();
+//     run_times++;
+//     if(run_times>=300)
+//     {
+//     g_motor_mode_first_run = false;
+//     printf("[EtherCAT] g_motor_mode_first_run=false\n");
+
+//     }
+//   }
+// else{
   //send
   command_mutex.lock();
   ec_send_processdata();
@@ -478,7 +515,7 @@ else{
   data_mutex.lock();
   wkc = ec_receive_processdata(EC_TIMEOUTRET);
   data_mutex.unlock();
-}
+// }
 
 
   //check for dropped packet
@@ -541,6 +578,8 @@ void rt_ethercat_get_data(TiBoardData* data) {
   #if ECAT_ENABLE_MOTOR_FEEDBACK_LOG
   feedback_monitor_tick_print();
   #endif
+
+  print_left_front_q_once_per_sec(data);
 
   data_mutex.unlock();
 }
