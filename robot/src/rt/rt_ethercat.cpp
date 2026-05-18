@@ -41,7 +41,7 @@ static void ec_close() { ecx_close(&ec_context); }
 #define CAN_DATA_LEN_FIXED 8
 
 #ifndef ECAT_ENABLE_MOTOR_FEEDBACK_LOG
-#define ECAT_ENABLE_MOTOR_FEEDBACK_LOG 1
+#define ECAT_ENABLE_MOTOR_FEEDBACK_LOG 0
 #endif
 
 static char IOmap[4096];
@@ -53,10 +53,11 @@ static bool ecat_initialized = false;
 // Change only this value when switching network adapters.
 static const char* kDefaultAdapter = "enp86s0";
 static const uint16 g_channel_offsets[CAN_CHANNEL_COUNT] = {0, 75, 150, 225};
-static uint8_t g_joint_rr_phase = 0;
+static uint8_t g_joint_rr_phase __attribute__((unused)) = 0;
 static TiBoardData g_latest_board_data[CAN_CHANNEL_COUNT];
 static bool g_board_data_inited = false;
 static bool g_shutdown_hook_registered = false;
+static bool g_motor_mode_first_run = true;
 static std::mutex command_mutex, data_mutex;
 static bool g_feedback_monitor_active = false;
 
@@ -251,6 +252,18 @@ static int can_recv_fixed8(const ec_slavet *slave, int channel, uint32 *can_id,
   return 1;
 }
 
+static void print_tx_frame(const char* prefix, uint32 can_id,
+                           const uint8 data[CAN_DATA_LEN_FIXED]) {
+  printf("%s ID=0x%08" PRIX32 " DATA=", prefix, can_id);
+  for (int i = 0; i < CAN_DATA_LEN_FIXED; i++) {
+    printf("%02X", data[i]);
+    if (i + 1 < CAN_DATA_LEN_FIXED) {
+      printf(" ");
+    }
+  }
+  printf("\n");
+}
+
 static void send_raw_frame_all_motors(const uint8 data[CAN_DATA_LEN_FIXED], int full_sweeps,
                                       const char* tag) {
   if (data == NULL || full_sweeps <= 0 || ec_slavecount < 1 || !ecat_initialized || !inOP) {
@@ -263,6 +276,9 @@ static void send_raw_frame_all_motors(const uint8 data[CAN_DATA_LEN_FIXED], int 
       const uint32 can_id = mit_motor_protocol::kJointCanIds[joint];
       for (int leg = 0; leg < CAN_CHANNEL_COUNT; leg++) {
         can_send_fixed8(slave, leg + 1, can_id, data);
+        if (leg == 0 && can_id == 0x01U) {
+          print_tx_frame("[EtherCAT] TX motor1", can_id, data);
+        }
       }
       ec_send_processdata();
       wkc = ec_receive_processdata(EC_TIMEOUTRET);
@@ -377,15 +393,12 @@ void rt_ethercat_init(const char* ifname) {
     if (ec_slave[0].state == EC_STATE_OPERATIONAL) {
       inOP = TRUE;
       ecat_initialized = true;
+      g_motor_mode_first_run = true;
+      printf("[EtherCAT] g_motor_mode_first_run=true\n");
       if (!g_shutdown_hook_registered) {
         atexit(rt_ethercat_shutdown_hook);
         g_shutdown_hook_registered = true;
       }
-      const uint8 motor_mode_frame[CAN_DATA_LEN_FIXED] = {
-          0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC};
-      command_mutex.lock();
-      send_raw_frame_all_motors(motor_mode_frame, 3, "sent motor-mode frame to all motors");
-      command_mutex.unlock();
 #if ECAT_ENABLE_MOTOR_FEEDBACK_LOG
       memset(g_feedback_rx_count_total, 0, sizeof(g_feedback_rx_count_total));
       feedback_monitor_reset_window();
@@ -445,6 +458,17 @@ void rt_ethercat_run()
     degraded_handler();
   }
 
+  // First cyclic run after OP: send motor-mode frame to all motors once.
+  if (g_motor_mode_first_run) {
+    const uint8 motor_mode_frame[CAN_DATA_LEN_FIXED] = {
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC};
+    command_mutex.lock();
+    send_raw_frame_all_motors(motor_mode_frame, 3,
+                              "sent motor-mode frame to all motors");
+    command_mutex.unlock();
+    g_motor_mode_first_run = false;
+  }
+else{
   //send
   command_mutex.lock();
   ec_send_processdata();
@@ -454,6 +478,8 @@ void rt_ethercat_run()
   data_mutex.lock();
   wkc = ec_receive_processdata(EC_TIMEOUTRET);
   data_mutex.unlock();
+}
+
 
   //check for dropped packet
   if(wkc < expectedWKC)
@@ -522,6 +548,10 @@ void rt_ethercat_get_data(TiBoardData* data) {
 void rt_ethercat_set_command(TiBoardCommand* command) {
   command_mutex.lock();
 
+  // Commented out control-command cyclic transmission.
+  // Keep only motor-mode (enable) transmission in rt_ethercat_run() first-run path.
+  /*  */
+
   if (command != nullptr && ec_slavecount >= 1) {
     ec_slavet* slave = &ec_slave[1];
 // 已通过上层腿索引验证：
@@ -552,6 +582,7 @@ void rt_ethercat_set_command(TiBoardCommand* command) {
     g_joint_rr_phase =
         static_cast<uint8_t>((g_joint_rr_phase + 1) % mit_motor_protocol::kJointCountPerLeg);
   }
+  (void)command;
 
   command_mutex.unlock();
 }
