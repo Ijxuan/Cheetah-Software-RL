@@ -17,7 +17,7 @@ include_directories("../third-party/SOEM/osal/linux")
 include_directories("../third-party/SOEM/oshw")
 include_directories("../third-party/SOEM/oshw/linux")
 
-file(GLOB sources "src/*.cpp" "src/rt/*.c"  "src/rt/*.cpp")
+file(GLOB sources CONFIGURE_DEPENDS "src/*.cpp" "src/rt/*.c" "src/rt/*.cpp")
 
 add_library(robot SHARED ${sources})
 

@@ -399,7 +399,9 @@ void MiniCheetahHardwareBridge::initHardware() {
 #endif
 
   // init_spi();
-  rt_ethercat_init("enp0s31f6");
+  // Use the default adapter configured in rt_ethercat.cpp so NIC name is
+  // maintained in a single place.
+  rt_ethercat_init();
 
   _microstrainInit = _microstrainImu.tryInit(0, 460800);//921600); // lord设置921600,        ttyUSB0
 
