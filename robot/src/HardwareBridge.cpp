@@ -318,7 +318,7 @@ void MiniCheetahHardwareBridge::run() {
 
   // EtherCAT task (replace SPI communication loop, 250us period)
   PeriodicMemberFunction<MiniCheetahHardwareBridge> ecatTask(
-      &taskManager, .00025, "ecat-mini", &MiniCheetahHardwareBridge::runSpi, this);
+      &taskManager, .001, "ecat-mini", &MiniCheetahHardwareBridge::runSpi, this);
   ecatTask.start();
 
   // microstrain

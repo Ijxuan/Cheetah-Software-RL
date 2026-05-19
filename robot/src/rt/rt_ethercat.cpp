@@ -41,7 +41,7 @@ static void ec_close() { ecx_close(&ec_context); }
 #define CAN_DATA_LEN_FIXED 8
 
 #ifndef ECAT_ENABLE_MOTOR_FEEDBACK_LOG
-#define ECAT_ENABLE_MOTOR_FEEDBACK_LOG 0
+#define ECAT_ENABLE_MOTOR_FEEDBACK_LOG 1
 #endif
 
 static char IOmap[4096];                 // SOEM 过程数据映射区（主站PDO内存镜像）
@@ -59,14 +59,8 @@ static bool g_board_data_inited = false;                                        
 static bool g_shutdown_hook_registered = false;                                 // 退出钩子（atexit）是否已注册
 static bool g_motor_mode_first_run = true;                                      // OP后首次循环标记：用于先发使能帧
 static std::mutex command_mutex, data_mutex;                                    // 命令区/数据区互斥锁
-static bool g_feedback_monitor_active = false;                                  // 电机回报统计监控开关
-static uint64_t g_lf_q_print_last_ns = 0;                                       // 左前腿关节角打印上次时间戳（1Hz打印）
-
-#if ECAT_ENABLE_MOTOR_FEEDBACK_LOG
-static uint32_t g_feedback_rx_count_1s[CAN_CHANNEL_COUNT][mit_motor_protocol::kJointCountPerLeg];
-static uint64_t g_feedback_rx_count_total[CAN_CHANNEL_COUNT][mit_motor_protocol::kJointCountPerLeg];
-static uint64_t g_feedback_window_start_ns = 0;
-#endif
+static uint64_t g_joint_q_print_last_ns = 0;                                    // 关节角打印上次时间戳（1Hz）
+static uint64_t g_raw_input_print_last_ns = 0;                                  // 原始输入PDO打印上次时间戳（1Hz）
 
 constexpr float kMitPMin = -12.5f;
 constexpr float kMitPMax = 12.5f;
@@ -74,6 +68,18 @@ constexpr float kMitVMin = -30.0f;
 constexpr float kMitVMax = 30.0f;
 constexpr float kMitTMin = -32.0f;
 constexpr float kMitTMax = 32.0f;
+constexpr float kPi = 3.14159265358979323846f;
+constexpr float kKneeOffsetPos = 2.52f;
+
+// 与 SPI 版本保持一致的“安装方向/零位偏置”参数
+static const float kAbadSideSign[4] = {-1.f, -1.f, 1.f, 1.f};
+static const float kHipSideSign[4] = {-1.f, 1.f, -1.f, 1.f};
+static const float kKneeSideSign[4] = {-1.f, 1.f, -1.f, 1.f};
+static const float kAbadOffset[4] = {0.f, 0.f, 0.f, 0.f};
+static const float kHipOffset[4] = {
+    kPi / 2.f - 0.08f, -kPi / 2.f + 0.08f, -kPi / 2.f + 0.08f, kPi / 2.f - 0.08f};
+static const float kKneeOffset[4] = {
+    kKneeOffsetPos, -kKneeOffsetPos, kKneeOffsetPos, -kKneeOffsetPos};
 
 static float uint_to_float(uint32_t x_int, float x_min, float x_max, int bits) {
   const float span = x_max - x_min;
@@ -81,28 +87,107 @@ static float uint_to_float(uint32_t x_int, float x_min, float x_max, int bits) {
   return ((float)x_int) * span / ((float)((1 << bits) - 1)) + offset;
 }
 
-static int feedback_motor_id_to_joint(uint8_t motor_id) {
-  // MIT dog feedback IDs on each CAN leg bus are commonly 1/3/5.
+static int motor_id_to_joint_idx(uint8_t motor_id) {
+  // 电机ID与关节索引映射（每条腿CAN总线一致）：
+  // ID1->joint0, ID2->joint1, ID3->joint2
   switch (motor_id) {
-    case 1:
-      return 0;
-    case 2:
-      return 1;
-    case 3:
-      return 2;
-    default:
-      return -1;
+    case 1: return 0;
+    case 2: return 1;
+    case 3: return 2;
+    default: return -1;
   }
 }
 
-static int decode_mit_feedback(const uint8 data[CAN_DATA_LEN_FIXED], int* joint, float* q,
-                               float* dq, float* tau) {
-  if (data == NULL || joint == NULL || q == NULL || dq == NULL || tau == NULL) {
+static int channel_to_leg_idx(int channel_idx) {
+  // 通道与腿映射（按当前工程约定）：
+  // channel0(CAN1)->FR(leg0), channel1(CAN2)->FL(leg1),
+  // channel2(CAN3)->RR(leg2), channel3(CAN4)->RL(leg3)
+  switch (channel_idx) {
+    case 0: return 0;
+    case 1: return 1;
+    case 2: return 2;
+    case 3: return 3;
+    default: return -1;
+  }
+}
+
+static float motor_pos_to_robot_q(int leg_idx, int joint_idx, float motor_q) {
+  switch (joint_idx) {
+    case 0:
+      return (motor_q - kAbadOffset[leg_idx]) * kAbadSideSign[leg_idx];
+    case 1:
+      return (motor_q - kHipOffset[leg_idx]) * kHipSideSign[leg_idx];
+    case 2:
+      return (motor_q - kKneeOffset[leg_idx]) * kKneeSideSign[leg_idx];
+    default:
+      return motor_q;
+  }
+}
+
+static float motor_vel_to_robot_dq(int leg_idx, int joint_idx, float motor_dq) {
+  switch (joint_idx) {
+    case 0:
+      return motor_dq * kAbadSideSign[leg_idx];
+    case 1:
+      return motor_dq * kHipSideSign[leg_idx];
+    case 2:
+      return motor_dq * kKneeSideSign[leg_idx];
+    default:
+      return motor_dq;
+  }
+}
+
+static float robot_q_to_motor_pos(int leg_idx, int joint_idx, float robot_q) {
+  switch (joint_idx) {
+    case 0:
+      return (robot_q * kAbadSideSign[leg_idx]) + kAbadOffset[leg_idx];
+    case 1:
+      return (robot_q * kHipSideSign[leg_idx]) + kHipOffset[leg_idx];
+    case 2:
+      return (robot_q / kKneeSideSign[leg_idx]) + kKneeOffset[leg_idx];
+    default:
+      return robot_q;
+  }
+}
+
+static float robot_dq_to_motor_vel(int leg_idx, int joint_idx, float robot_dq) {
+  switch (joint_idx) {
+    case 0:
+      return robot_dq * kAbadSideSign[leg_idx];
+    case 1:
+      return robot_dq * kHipSideSign[leg_idx];
+    case 2:
+      return robot_dq / kKneeSideSign[leg_idx];
+    default:
+      return robot_dq;
+  }
+}
+
+static float robot_tau_to_motor_tauff(int leg_idx, int joint_idx, float robot_tau) {
+  switch (joint_idx) {
+    case 0:
+      return robot_tau * kAbadSideSign[leg_idx];
+    case 1:
+      return robot_tau * kHipSideSign[leg_idx];
+    case 2:
+      return robot_tau * kKneeSideSign[leg_idx];
+    default:
+      return robot_tau;
+  }
+}
+
+static int decode_mit_feedback_with_channel(int channel_idx,
+                                            const uint8 data[CAN_DATA_LEN_FIXED],
+                                            int* leg_idx, int* joint_idx,
+                                            float* q, float* dq, float* tau) {
+  if (data == NULL || leg_idx == NULL || joint_idx == NULL ||
+      q == NULL || dq == NULL || tau == NULL) {
     return 0;
   }
 
-  const int joint_idx = feedback_motor_id_to_joint(data[0]);
-  if (joint_idx < 0) {
+  const int mapped_leg = channel_to_leg_idx(channel_idx);
+  const int mapped_joint = motor_id_to_joint_idx(data[0]);
+  if (mapped_leg < 0 || mapped_joint < 0) {
     return 0;
   }
 
@@ -110,7 +195,8 @@ static int decode_mit_feedback(const uint8 data[CAN_DATA_LEN_FIXED], int* joint,
   const uint32_t v_uint = ((uint32_t)(data[4] >> 4)) | (((uint32_t)data[3]) << 4);
   const uint32_t t_uint = ((uint32_t)data[5]) | (((uint32_t)(data[4] & 0x0F)) << 8);
 
-  *joint = joint_idx;
+  *leg_idx = mapped_leg;
+  *joint_idx = mapped_joint;
   *q = uint_to_float(p_uint, kMitPMin, kMitPMax, 16);
   *dq = uint_to_float(v_uint, kMitVMin, kMitVMax, 12);
   *tau = uint_to_float(t_uint, kMitTMin, kMitTMax, 12);
@@ -123,87 +209,58 @@ static uint64_t monotonic_time_ns_always() {
   return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-static void print_left_front_q_once_per_sec(const TiBoardData* data) {
+static void print_all_joint_q_once_per_sec(const TiBoardData* data) {
   if (data == NULL) {
     return;
   }
 
-  // Leg index mapping used in this file: 0=FR, 1=FL, 2=RR, 3=RL.
-  constexpr int kLeftFrontLegIdx = 1;
   const uint64_t now_ns = monotonic_time_ns_always();
-  if (g_lf_q_print_last_ns != 0 &&
-      (now_ns - g_lf_q_print_last_ns) < 1000000000ULL) {
+  if (g_joint_q_print_last_ns != 0 &&
+      (now_ns - g_joint_q_print_last_ns) < 1000000000ULL) {
     return;
   }
 
-  g_lf_q_print_last_ns = now_ns;
-  printf("[EtherCAT] LF q(rad): %.6f %.6f %.6f\n",
-         data[kLeftFrontLegIdx].q[0], data[kLeftFrontLegIdx].q[1],
-         data[kLeftFrontLegIdx].q[2]);
+  g_joint_q_print_last_ns = now_ns;
+  printf("[EtherCAT][Q] FR: %.6f %.6f %.6f | FL: %.6f %.6f %.6f | RR: %.6f %.6f %.6f | RL: %.6f %.6f %.6f\n",
+         data[0].q[0], data[0].q[1], data[0].q[2],
+         data[1].q[0], data[1].q[1], data[1].q[2],
+         data[2].q[0], data[2].q[1], data[2].q[2],
+         data[3].q[0], data[3].q[1], data[3].q[2]);
+}
+
+static void print_raw_input_pdo_once_per_sec(const ec_slavet* slave) {
+  if (slave == NULL || slave->inputs == NULL) {
+    return;
+  }
+
+  const uint64_t now_ns = monotonic_time_ns_always();
+  if (g_raw_input_print_last_ns != 0 &&
+      (now_ns - g_raw_input_print_last_ns) < 1000000000ULL) {
+    return;
+  }
+
+  g_raw_input_print_last_ns = now_ns;
+  const int raw_len = (slave->Ibytes >= 300) ? 300 : (int)slave->Ibytes;
+  const uint8* raw = slave->inputs;
+  printf("[EtherCAT][RAW] Slave->Master input PDO (%d bytes):\n", raw_len);
+  for (int i = 0; i < raw_len; i++) {
+    if ((i % 16) == 0) {
+      printf("  [%03d] ", i);
+    }
+    printf("%02X ", raw[i]);
+    if ((i % 16) == 15 || i == raw_len - 1) {
+      printf("\n");
+    }
+  }
 }
 
 #if ECAT_ENABLE_MOTOR_FEEDBACK_LOG
-static uint64_t monotonic_time_ns() {
-  timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+static void feedback_monitor_tick_print(const TiBoardData* data) {
+  print_all_joint_q_once_per_sec(data);
 }
-
-static int motor_linear_id(int leg, int joint) {
-  return leg * mit_motor_protocol::kJointCountPerLeg + joint + 1;
-}
-
-static void feedback_monitor_reset_window() {
-  memset(g_feedback_rx_count_1s, 0, sizeof(g_feedback_rx_count_1s));
-  g_feedback_window_start_ns = monotonic_time_ns();
-}
-
-static void feedback_monitor_on_rx(int leg, int joint) {
-  if (!g_feedback_monitor_active) {
-    return;
-  }
-  if (leg < 0 || leg >= CAN_CHANNEL_COUNT || joint < 0 ||
-      joint >= mit_motor_protocol::kJointCountPerLeg) {
-    return;
-  }
-  g_feedback_rx_count_1s[leg][joint]++;
-  g_feedback_rx_count_total[leg][joint]++;
-}
-
-static void feedback_monitor_tick_print() {
-  if (!g_feedback_monitor_active) {
-    return;
-  }
-
-  const uint64_t now_ns = monotonic_time_ns();
-  if (g_feedback_window_start_ns == 0) {
-    g_feedback_window_start_ns = now_ns;
-    return;
-  }
-  if (now_ns - g_feedback_window_start_ns < 1000000000ULL) {
-    return;
-  }
-
-  printf("[EtherCAT][FB] 1s rx:");
-  for (int leg = 0; leg < CAN_CHANNEL_COUNT; leg++) {
-    for (int joint = 0; joint < mit_motor_protocol::kJointCountPerLeg; joint++) {
-      const int mid = motor_linear_id(leg, joint);
-      printf(" M%02d=%" PRIu32, mid, g_feedback_rx_count_1s[leg][joint]);
-    }
-  }
-  printf("\n");
-
-  for (int leg = 0; leg < CAN_CHANNEL_COUNT; leg++) {
-    for (int joint = 0; joint < mit_motor_protocol::kJointCountPerLeg; joint++) {
-      if (g_feedback_rx_count_1s[leg][joint] == 0) {
-        const int mid = motor_linear_id(leg, joint);
-        printf("[EtherCAT][FB] motor %d offline in last 1s (leg=%d joint=%d)\n",
-               mid, leg, joint);
-      }
-    }
-  }
-
-  feedback_monitor_reset_window();
+#else
+static void feedback_monitor_tick_print(const TiBoardData* data) {
+  (void)data;
 }
 #endif
 
@@ -269,56 +326,61 @@ static int can_recv_fixed8(const ec_slavet *slave, int channel, uint32 *can_id,
   }
 
   base = slave->inputs + offset;
-  if (base[4] != CAN_DLC_FIXED) {
+  // 回报帧可能是 6 字节（MIT 常见），不一定固定 8 字节。
+  // 这里只做“至少有 6 字节”的校验，随后按实际 DLC 拷贝到本地 8 字节缓冲。
+  const uint8 dlc = base[4];
+  if (dlc < 6) {
     return 0;
   }
 
   *can_id = read_u32_be(base);
-  memcpy(data, &base[5], CAN_DATA_LEN_FIXED);
+  memset(data, 0, CAN_DATA_LEN_FIXED);
+  const uint8 copy_len = (dlc < CAN_DATA_LEN_FIXED) ? dlc : CAN_DATA_LEN_FIXED;
+  memcpy(data, &base[5], copy_len);
   return 1;
 }
 // 发送ID轮转槽位：0->ID1, 1->ID2, 2->ID3，然后回到0。
-// static int g_motor_slot = 0;
+static int g_motor_slot = 0;
 
-// static void print_tx_frame(const char* prefix, uint32 can_id,
-//                            const uint8 data[CAN_DATA_LEN_FIXED]) {
-//   printf("%s ID=0x%08" PRIX32 " DATA=", prefix, can_id);
-//   for (int i = 0; i < CAN_DATA_LEN_FIXED; i++) {
-//     printf("%02X", data[i]);
-//     if (i + 1 < CAN_DATA_LEN_FIXED) {
-//       printf(" ");
-//     }
-//   }
-//   printf("\n");
-// }
+static void print_tx_frame(const char* prefix, uint32 can_id,
+                           const uint8 data[CAN_DATA_LEN_FIXED]) {
+  printf("%s ID=0x%08" PRIX32 " DATA=", prefix, can_id);
+  for (int i = 0; i < CAN_DATA_LEN_FIXED; i++) {
+    printf("%02X", data[i]);
+    if (i + 1 < CAN_DATA_LEN_FIXED) {
+      printf(" ");
+    }
+  }
+  printf("\n");
+}
 
 // 固定场景发送函数：
 // 1 个 EtherCAT 从站，4 条 CAN（对应 4 条腿），每条 CAN 上 3 个电机 ID（1/2/3）。
 // 每次调用只发送 1 个 ID（1/2/3 中之一）到 4 条 CAN 通道。
 // 调用次数决定发几次；ID按 1->2->3->1... 自动轮转。
-// static void send_same_frame_to_all_12_motors(const uint8 data[CAN_DATA_LEN_FIXED],
-//                                              const char* tag) {
-//   if (data == NULL || ec_slavecount < 1 || !ecat_initialized || !inOP) {
-//     return;
-//   }
+static void send_same_frame_to_all_12_motors(const uint8 data[CAN_DATA_LEN_FIXED],
+                                             const char* tag) {
+  if (data == NULL || ec_slavecount < 1 || !ecat_initialized || !inOP) {
+    return;
+  }
 
-//   ec_slavet* slave = &ec_slave[1];
-//   const uint32 can_id = mit_motor_protocol::kJointCanIds[g_motor_slot];
-//   for (int leg = 0; leg < 4; leg++) {
-//     can_send_fixed8(slave, leg + 1, can_id, data);
-//     if (leg == 0) {
-//       print_tx_frame("[EtherCAT] TX motor1", can_id, data);
-//     }
-//   }
+  ec_slavet* slave = &ec_slave[1];
+  const uint32 can_id = mit_motor_protocol::kJointCanIds[g_motor_slot];
+  for (int leg = 0; leg < 4; leg++) {
+    can_send_fixed8(slave, leg + 1, can_id, data);
+    if (leg == 0) {
+      print_tx_frame("[EtherCAT] TX motor1", can_id, data);
+    }
+  }
 
-//   ec_send_processdata();
-//   wkc = ec_receive_processdata(EC_TIMEOUTRET);
-//   g_motor_slot = (g_motor_slot + 1) % mit_motor_protocol::kJointCountPerLeg;
+  ec_send_processdata();
+  wkc = ec_receive_processdata(EC_TIMEOUTRET);
+  g_motor_slot = (g_motor_slot + 1) % mit_motor_protocol::kJointCountPerLeg;
 
-//   if (tag != NULL) {
-//     printf("[EtherCAT] %s done (next_slot=%d)\n", tag, g_motor_slot);
-//   }
-// }
+  if (tag != NULL) {
+    printf("[EtherCAT] %s done (next_slot=%d)\n", tag, g_motor_slot);
+  }
+}
 
 static void rt_ethercat_shutdown() {
   // command_mutex.lock();
@@ -330,7 +392,6 @@ static void rt_ethercat_shutdown() {
 
   inOP = FALSE;
   ecat_initialized = false;
-  g_feedback_monitor_active = false;
   ec_close();
 }
 
@@ -428,11 +489,6 @@ void rt_ethercat_init(const char* ifname) {
         atexit(rt_ethercat_shutdown_hook);
         g_shutdown_hook_registered = true;
       }
-#if ECAT_ENABLE_MOTOR_FEEDBACK_LOG
-      memset(g_feedback_rx_count_total, 0, sizeof(g_feedback_rx_count_total));
-      feedback_monitor_reset_window();
-#endif
-      g_feedback_monitor_active = true;
       printf("[EtherCAT] OP reached (attempt %d), WKC=%d\n", attempt, wkc);
       return;
     }
@@ -490,22 +546,22 @@ void rt_ethercat_run()
   }
 
   // First cyclic run after OP: send motor-mode frame to all motors once.
-//   if (g_motor_mode_first_run) {
-//     const uint8 motor_mode_frame[CAN_DATA_LEN_FIXED] = {
-//         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC};
-//     command_mutex.lock();
-//     send_same_frame_to_all_12_motors(motor_mode_frame,
-//                                      "sent motor-mode frame to all motors");
-//     command_mutex.unlock();
-//     run_times++;
-//     if(run_times>=300)
-//     {
-//     g_motor_mode_first_run = false;
-//     printf("[EtherCAT] g_motor_mode_first_run=false\n");
+  if (g_motor_mode_first_run) {
+    const uint8 motor_mode_frame[CAN_DATA_LEN_FIXED] = {
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD};
+    command_mutex.lock();
+    send_same_frame_to_all_12_motors(motor_mode_frame,
+                                     "sent motor-mode frame to all motors");
+    command_mutex.unlock();
+    run_times++;
+    if(run_times>=9)
+    {
+    g_motor_mode_first_run = false;
+    printf("[EtherCAT] g_motor_mode_first_run=false\n");
 
-//     }
-//   }
-// else{
+    }
+  }
+else{
   //send
   command_mutex.lock();
   ec_send_processdata();
@@ -515,7 +571,7 @@ void rt_ethercat_run()
   data_mutex.lock();
   wkc = ec_receive_processdata(EC_TIMEOUTRET);
   data_mutex.unlock();
-// }
+}
 
 
   //check for dropped packet
@@ -541,45 +597,54 @@ void rt_ethercat_get_data(TiBoardData* data) {
     g_board_data_inited = true;
   }
 
-  for (int leg = 0; leg < CAN_CHANNEL_COUNT; leg++) {
+  // 1) 按顺序读取 4 路 CAN 通道的从站输入PDO
+  for (int channel_idx = 0; channel_idx < CAN_CHANNEL_COUNT; channel_idx++) {
     uint32 can_id = 0;
     uint8 can_data[CAN_DATA_LEN_FIXED] = {0};
-    if (can_recv_fixed8(slave, leg + 1, &can_id, can_data)) {
-      // New MIT feedback format:
-      //   CAN ID is 0 for all motors; payload byte0 carries motor ID.
+    if (can_recv_fixed8(slave, channel_idx + 1, &can_id, can_data)) {
+      // 2) 按协议判断消息类型：
+      //    电机回报帧: CAN ID=0, 数据第1字节(data[0])是电机ID
       if (can_id == 0) {
-        int joint = -1;
+        int leg_idx = -1;
+        int joint_idx = -1;
         float q = 0.f, dq = 0.f, tau = 0.f;
-        if (decode_mit_feedback(can_data, &joint, &q, &dq, &tau)) {
-          #if ECAT_ENABLE_MOTOR_FEEDBACK_LOG
-          feedback_monitor_on_rx(leg, joint);
-          #endif
-          g_latest_board_data[leg].q[joint] = q;
-          g_latest_board_data[leg].dq[joint] = dq;
-          g_latest_board_data[leg].tau[joint] = tau;
+        // 3) 解包MIT回报数据，并根据“通道+电机ID”映射到 leg/joint
+        if (decode_mit_feedback_with_channel(channel_idx, can_data, &leg_idx,
+                                             &joint_idx, &q, &dq, &tau)) {
+          // 3.1) 电机坐标 -> 程序关节坐标（迁移 SPI 的 side_sign + offset）
+          q = motor_pos_to_robot_q(leg_idx, joint_idx, q);
+          dq = motor_vel_to_robot_dq(leg_idx, joint_idx, dq);
+
+          // 4) 将解包后的角度/角速度/电流写入对应腿与关节
+          g_latest_board_data[leg_idx].q[joint_idx] = q;
+          g_latest_board_data[leg_idx].dq[joint_idx] = dq;
+          g_latest_board_data[leg_idx].tau[joint_idx] = tau;
 
           // Keep these aliases consistent for existing debug/LCM outputs.
-          g_latest_board_data[leg].position[joint] = q;
-          g_latest_board_data[leg].velocity[joint] = dq;
-          g_latest_board_data[leg].force[joint] = tau;
+          g_latest_board_data[leg_idx].position[joint_idx] = q;
+          g_latest_board_data[leg_idx].velocity[joint_idx] = dq;
+          g_latest_board_data[leg_idx].force[joint_idx] = tau;
         }
       } else {
-        // Backward compatibility for older diagnostic frame payloads.
-        g_latest_board_data[leg].loop_count_ti = can_id;
-        g_latest_board_data[leg].ethercat_count_ti = read_u32_be(can_data);
-        g_latest_board_data[leg].microtime_ti = read_u32_be(can_data + 4);
+        // 兼容旧诊断帧：非电机回报时按原格式记录计数信息
+        const int leg_idx = channel_to_leg_idx(channel_idx);
+        if (leg_idx >= 0) {
+          g_latest_board_data[leg_idx].loop_count_ti = can_id;
+          g_latest_board_data[leg_idx].ethercat_count_ti = read_u32_be(can_data);
+          g_latest_board_data[leg_idx].microtime_ti = read_u32_be(can_data + 4);
+        }
       }
     }
 
-    // Always publish accumulated state so 3 cycles complete all 12 motors.
-    data[leg] = g_latest_board_data[leg];
+    // 5) 将每条腿聚合后的最新状态复制到输出参数
+    const int leg_idx = channel_to_leg_idx(channel_idx);
+    if (leg_idx >= 0) {
+      data[leg_idx] = g_latest_board_data[leg_idx];
+    }
   }
 
-  #if ECAT_ENABLE_MOTOR_FEEDBACK_LOG
-  feedback_monitor_tick_print();
-  #endif
-
-  print_left_front_q_once_per_sec(data);
+  feedback_monitor_tick_print(data);
+  print_raw_input_pdo_once_per_sec(slave);
 
   data_mutex.unlock();
 }
@@ -607,11 +672,14 @@ void rt_ethercat_set_command(TiBoardCommand* command) {
       uint8 can_data[CAN_DATA_LEN_FIXED] = {0};
       uint32 can_id = mit_motor_protocol::kJointCanIds[joint];
       const TiBoardCommand& leg_cmd = command[leg];
+      const float motor_q_des = robot_q_to_motor_pos(leg, joint, leg_cmd.q_des[joint]);
+      const float motor_qd_des = robot_dq_to_motor_vel(leg, joint, leg_cmd.qd_des[joint]);
+      const float motor_tau_ff = robot_tau_to_motor_tauff(leg, joint, leg_cmd.tau_ff[joint]);
 
       if (leg_cmd.enable) {
         mit_motor_protocol::pack_control_command(
-            leg_cmd.q_des[joint], leg_cmd.qd_des[joint], leg_cmd.kp_joint[joint],
-            leg_cmd.kd_joint[joint], leg_cmd.tau_ff[joint], can_data);
+            motor_q_des, motor_qd_des, leg_cmd.kp_joint[joint],
+            leg_cmd.kd_joint[joint], motor_tau_ff, can_data);
       } else {
         mit_motor_protocol::pack_control_command(0.f, 0.f, 0.f, 0.f, 0.f, can_data);
       }
