@@ -41,7 +41,7 @@ static void ec_close() { ecx_close(&ec_context); }
 #define CAN_DATA_LEN_FIXED 8
 
 #ifndef ECAT_ENABLE_MOTOR_FEEDBACK_LOG
-#define ECAT_ENABLE_MOTOR_FEEDBACK_LOG 1
+#define ECAT_ENABLE_MOTOR_FEEDBACK_LOG 0
 #endif
 
 static char IOmap[4096];                 // SOEM 过程数据映射区（主站PDO内存镜像）
@@ -59,8 +59,6 @@ static bool g_board_data_inited = false;                                        
 static bool g_shutdown_hook_registered = false;                                 // 退出钩子（atexit）是否已注册
 static bool g_motor_mode_first_run = true;                                      // OP后首次循环标记：用于先发使能帧
 static std::mutex command_mutex, data_mutex;                                    // 命令区/数据区互斥锁
-static uint64_t g_joint_q_print_last_ns = 0;                                    // 关节角打印上次时间戳（1Hz）
-static uint64_t g_raw_input_print_last_ns = 0;                                  // 原始输入PDO打印上次时间戳（1Hz）
 
 constexpr float kMitPMin = -12.5f;
 constexpr float kMitPMax = 12.5f;
@@ -203,6 +201,10 @@ static int decode_mit_feedback_with_channel(int channel_idx,
   return 1;
 }
 
+#if ECAT_ENABLE_MOTOR_FEEDBACK_LOG
+static uint64_t g_joint_q_print_last_ns = 0;  // 关节角打印上次时间戳（1Hz）
+static uint64_t g_raw_input_print_last_ns = 0;  // 原始输入PDO打印上次时间戳（1Hz）
+
 static uint64_t monotonic_time_ns_always() {
   timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -254,13 +256,16 @@ static void print_raw_input_pdo_once_per_sec(const ec_slavet* slave) {
   }
 }
 
-#if ECAT_ENABLE_MOTOR_FEEDBACK_LOG
-static void feedback_monitor_tick_print(const TiBoardData* data) {
+static void feedback_monitor_tick_print(const TiBoardData* data,
+                                        const ec_slavet* slave) {
   print_all_joint_q_once_per_sec(data);
+  print_raw_input_pdo_once_per_sec(slave);
 }
 #else
-static void feedback_monitor_tick_print(const TiBoardData* data) {
+static void feedback_monitor_tick_print(const TiBoardData* data,
+                                        const ec_slavet* slave) {
   (void)data;
+  (void)slave;
 }
 #endif
 
@@ -548,13 +553,13 @@ void rt_ethercat_run()
   // First cyclic run after OP: send motor-mode frame to all motors once.
   if (g_motor_mode_first_run) {
     const uint8 motor_mode_frame[CAN_DATA_LEN_FIXED] = {
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD};
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC};
     command_mutex.lock();
     send_same_frame_to_all_12_motors(motor_mode_frame,
                                      "sent motor-mode frame to all motors");
     command_mutex.unlock();
     run_times++;
-    if(run_times>=9)
+    if(run_times>=3)
     {
     g_motor_mode_first_run = false;
     printf("[EtherCAT] g_motor_mode_first_run=false\n");
@@ -643,8 +648,7 @@ void rt_ethercat_get_data(TiBoardData* data) {
     }
   }
 
-  feedback_monitor_tick_print(data);
-  print_raw_input_pdo_once_per_sec(slave);
+  feedback_monitor_tick_print(data, slave);
 
   data_mutex.unlock();
 }
