@@ -51,7 +51,7 @@ static boolean inOP;                     // EtherCAT 网络是否已进入 OP �
 static bool ecat_initialized = false;    // EtherCAT 初始化是否完成
 // Single source of truth for EtherCAT NIC name.
 // Change only this value when switching network adapters.
-static const char* kDefaultAdapter = "enp86s0";
+static const char* kDefaultAdapter = "enp86s0";//thinkbook： enp0s31f6  nuc： enp86s0
 static const uint16 g_channel_offsets[CAN_CHANNEL_COUNT] = {0, 75, 150, 225};  // 4路CAN在从站PDO内的偏移
 static uint8_t g_joint_rr_phase __attribute__((unused)) = 0;                    // 关节轮转发送阶段（控制发送被注释后保留）
 static TiBoardData g_latest_board_data[CAN_CHANNEL_COUNT];                      // 每条CAN通道最近一次聚合后的关节状态缓存
@@ -61,6 +61,7 @@ static bool g_enable_edge_inited = false;                                       
 static bool g_prev_enable_cmd = false;                                          // 上一次收到的enable状态（来自上层_legsEnabled）
 static int g_transition_mode = 0;                                               // 0:无特殊帧 1:ENTER(FC) 2:EXIT(FD)
 static int g_transition_step = 0;                                               // 特殊帧序列当前步(0..2)
+static uint8_t g_print_after_enter_fc_pending_mask = 0;                         // FC后待打印普通帧的腿掩码(bit0~bit3)
 // 四路CAN发送开关（1=发送, 0=关闭该通道发送）。
 // 通道映射：CH1->FR, CH2->FL, CH3->RR, CH4->RL
 // 测试单腿时，把其它腿对应开关置0即可（会把该通道DLC改为0）。
@@ -669,18 +670,9 @@ void rt_ethercat_set_command(TiBoardCommand* command) {
 
   if (command != nullptr && ec_slavecount >= 1) {
     ec_slavet* slave = &ec_slave[1];
-    bool all_enable_equal = true;
     const bool enable_cmd = (command[0].enable != 0);
-    for (int leg = 1; leg < CAN_CHANNEL_COUNT; leg++) {
-      if ((command[leg].enable != 0) != enable_cmd) {
-        all_enable_equal = false;
-        break;
-      }
-    }
-    if (!all_enable_equal) {
-      printf("[EtherCAT] Warning: per-leg enable mismatch, using leg0 enable=%d\n",
-             (int)enable_cmd);
-    }
+    // 对齐旧 SPI->CAN 逻辑：使能判定只看 flags[0] bit0。
+    // 在本桥接中等价为只看 leg0 的 enable。
 
     if (!g_enable_edge_inited) {
       g_enable_edge_inited = true;
@@ -694,6 +686,39 @@ void rt_ethercat_set_command(TiBoardCommand* command) {
       g_prev_enable_cmd = enable_cmd;
       printf("[EtherCAT] enable-edge detected, transition=%s\n",
              enable_cmd ? "ENTER(FC)" : "EXIT(FD)");
+
+      // 调试打印：在发送 FC 使能特殊帧前，打印 CH2(FL) 大腿电机(ID2)的普通控制帧内容。
+      // 哪条腿的 CAN 通道开关为1，就打印哪条腿（可多条同时打印）。
+      if (enable_cmd) {
+        const int dbg_joint = 1; // thigh -> ID2
+        const int tx_enable[CAN_CHANNEL_COUNT] = {
+            g_can_ch1_tx_enable, g_can_ch2_tx_enable, g_can_ch3_tx_enable, g_can_ch4_tx_enable};
+        for (int dbg_leg = 0; dbg_leg < CAN_CHANNEL_COUNT; dbg_leg++) {
+          if (tx_enable[dbg_leg] != 1) {
+            continue;
+          }
+          uint8 dbg_can_data[CAN_DATA_LEN_FIXED] = {0};
+          const TiBoardCommand& dbg_cmd = command[dbg_leg];
+          const float dbg_motor_q_des =
+              robot_q_to_motor_pos(dbg_leg, dbg_joint, dbg_cmd.q_des[dbg_joint]);
+          const float dbg_motor_qd_des =
+              robot_dq_to_motor_vel(dbg_leg, dbg_joint, dbg_cmd.qd_des[dbg_joint]);
+          const float dbg_motor_tau_ff =
+              robot_tau_to_motor_tauff(dbg_leg, dbg_joint, dbg_cmd.tau_ff[dbg_joint]);
+          const float dbg_kp = dbg_cmd.enable ? dbg_cmd.kp_joint[dbg_joint] : 0.f;
+          const float dbg_kd = dbg_cmd.enable ? dbg_cmd.kd_joint[dbg_joint] : 0.f;
+          const float dbg_tau = dbg_cmd.enable ? dbg_motor_tau_ff : 0.f;
+          mit_motor_protocol::pack_control_command(
+              dbg_motor_q_des, dbg_motor_qd_des, dbg_kp, dbg_kd, dbg_tau, dbg_can_data);
+          printf("[EtherCAT][DBG] Before FC, CH%d thigh normal frame (ID=0x%08X) DATA=",
+                 dbg_leg + 1, (unsigned)mit_motor_protocol::kJointCanIds[dbg_joint]);
+          for (int i = 0; i < CAN_DATA_LEN_FIXED; i++) {
+            printf("%02X", dbg_can_data[i]);
+            if (i + 1 < CAN_DATA_LEN_FIXED) printf(" ");
+          }
+          printf("\n");
+        }
+      }
     }
 
     // 特殊帧序列执行期间暂停普通控制帧，保证每个周期总线负载稳定。
@@ -715,6 +740,14 @@ void rt_ethercat_set_command(TiBoardCommand* command) {
           "[transition] special-frame");
       g_transition_step++;
       if (g_transition_step >= mit_motor_protocol::kJointCountPerLeg) {
+        if (g_transition_mode == 1) {
+          // 进入模式(FC)后，请求打印“后续第一帧”对应腿的大腿普通控制帧。
+          g_print_after_enter_fc_pending_mask = 0;
+          if (g_can_ch1_tx_enable == 1) g_print_after_enter_fc_pending_mask |= (1u << 0);
+          if (g_can_ch2_tx_enable == 1) g_print_after_enter_fc_pending_mask |= (1u << 1);
+          if (g_can_ch3_tx_enable == 1) g_print_after_enter_fc_pending_mask |= (1u << 2);
+          if (g_can_ch4_tx_enable == 1) g_print_after_enter_fc_pending_mask |= (1u << 3);
+        }
         g_transition_mode = 0;
         g_transition_step = 0;
         printf("[EtherCAT] transition finished\n");
@@ -749,6 +782,21 @@ void rt_ethercat_set_command(TiBoardCommand* command) {
       // 同时将 kp/kd/tau 置零，避免闭环增益与前馈力矩生效。
       mit_motor_protocol::pack_control_command(
           motor_q_des, motor_qd_des, kp_cmd, kd_cmd, tau_cmd, can_data);
+
+      // 调试打印：FC 特殊帧序列后，打印第一帧对应腿的大腿电机(ID2)普通控制帧。
+      if (g_print_after_enter_fc_pending_mask != 0 &&
+          can_id == mit_motor_protocol::kJointCanIds[1] &&
+          (g_print_after_enter_fc_pending_mask & (1u << leg))) {
+        printf("[EtherCAT][DBG] After FC, CH%d thigh normal frame (ID=0x%08X) DATA=",
+               leg + 1,
+               (unsigned)can_id);
+        for (int i = 0; i < CAN_DATA_LEN_FIXED; i++) {
+          printf("%02X", can_data[i]);
+          if (i + 1 < CAN_DATA_LEN_FIXED) printf(" ");
+        }
+        printf("\n");
+        g_print_after_enter_fc_pending_mask &= (uint8_t)~(1u << leg);
+      }
 
       can_send_fixed8(slave, leg + 1, can_id, can_data);
     }

@@ -305,6 +305,11 @@ void MiniCheetahHardwareBridge::run() {
   _robotRunner->visualizationData = &_visualizationData;
   _robotRunner->cheetahMainVisualization = &_mainCheetahVisualization;
 
+  // Ensure deterministic startup command state before EtherCAT task starts.
+  // Otherwise early runSpi() cycles may read uninitialized _spiCommand flags.
+  memset(&_spiCommand, 0, sizeof(_spiCommand));
+  memset(&_spiData, 0, sizeof(_spiData));
+
   _firstRun = false;
 
   // init control thread
@@ -435,6 +440,10 @@ void MiniCheetahHardwareBridge::runSpi() {
   // _spiLcm.publish("spi_data", data);
   // _spiLcm.publish("spi_command", cmd);
 
+  // Snapshot command once per cycle to avoid mixed-frame reads while RobotRunner
+  // updates _spiCommand concurrently in another thread.
+  const auto spi_cmd_snapshot = _spiCommand;
+
   for (int leg = 0; leg < 4; leg++) {
     for (int axis = 0; axis < 3; axis++) {
       _tiBoardCommand[leg].position_des[axis] = 0.f;
@@ -445,22 +454,22 @@ void MiniCheetahHardwareBridge::runSpi() {
       _tiBoardCommand[leg].zero_offset[axis] = 0.f;
     }
 
-    _tiBoardCommand[leg].q_des[0] = _spiCommand.q_des_abad[leg];
-    _tiBoardCommand[leg].q_des[1] = _spiCommand.q_des_hip[leg];
-    _tiBoardCommand[leg].q_des[2] = _spiCommand.q_des_knee[leg];
-    _tiBoardCommand[leg].qd_des[0] = _spiCommand.qd_des_abad[leg];
-    _tiBoardCommand[leg].qd_des[1] = _spiCommand.qd_des_hip[leg];
-    _tiBoardCommand[leg].qd_des[2] = _spiCommand.qd_des_knee[leg];
-    _tiBoardCommand[leg].kp_joint[0] = _spiCommand.kp_abad[leg];
-    _tiBoardCommand[leg].kp_joint[1] = _spiCommand.kp_hip[leg];
-    _tiBoardCommand[leg].kp_joint[2] = _spiCommand.kp_knee[leg];
-    _tiBoardCommand[leg].kd_joint[0] = _spiCommand.kd_abad[leg];
-    _tiBoardCommand[leg].kd_joint[1] = _spiCommand.kd_hip[leg];
-    _tiBoardCommand[leg].kd_joint[2] = _spiCommand.kd_knee[leg];
-    _tiBoardCommand[leg].tau_ff[0] = _spiCommand.tau_abad_ff[leg];
-    _tiBoardCommand[leg].tau_ff[1] = _spiCommand.tau_hip_ff[leg];
-    _tiBoardCommand[leg].tau_ff[2] = _spiCommand.tau_knee_ff[leg];
-    _tiBoardCommand[leg].enable = (_spiCommand.flags[leg] != 0) ? 1 : 0;
+    _tiBoardCommand[leg].q_des[0] = spi_cmd_snapshot.q_des_abad[leg];
+    _tiBoardCommand[leg].q_des[1] = spi_cmd_snapshot.q_des_hip[leg];
+    _tiBoardCommand[leg].q_des[2] = spi_cmd_snapshot.q_des_knee[leg];
+    _tiBoardCommand[leg].qd_des[0] = spi_cmd_snapshot.qd_des_abad[leg];
+    _tiBoardCommand[leg].qd_des[1] = spi_cmd_snapshot.qd_des_hip[leg];
+    _tiBoardCommand[leg].qd_des[2] = spi_cmd_snapshot.qd_des_knee[leg];
+    _tiBoardCommand[leg].kp_joint[0] = spi_cmd_snapshot.kp_abad[leg];
+    _tiBoardCommand[leg].kp_joint[1] = spi_cmd_snapshot.kp_hip[leg];
+    _tiBoardCommand[leg].kp_joint[2] = spi_cmd_snapshot.kp_knee[leg];
+    _tiBoardCommand[leg].kd_joint[0] = spi_cmd_snapshot.kd_abad[leg];
+    _tiBoardCommand[leg].kd_joint[1] = spi_cmd_snapshot.kd_hip[leg];
+    _tiBoardCommand[leg].kd_joint[2] = spi_cmd_snapshot.kd_knee[leg];
+    _tiBoardCommand[leg].tau_ff[0] = spi_cmd_snapshot.tau_abad_ff[leg];
+    _tiBoardCommand[leg].tau_ff[1] = spi_cmd_snapshot.tau_hip_ff[leg];
+    _tiBoardCommand[leg].tau_ff[2] = spi_cmd_snapshot.tau_knee_ff[leg];
+    _tiBoardCommand[leg].enable = (spi_cmd_snapshot.flags[leg] != 0) ? 1 : 0;
     _tiBoardCommand[leg].zero = 0;
     _tiBoardCommand[leg].max_torque = 208.5f;
   }
