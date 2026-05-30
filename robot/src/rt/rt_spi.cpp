@@ -36,6 +36,9 @@ pthread_mutex_t spi_mutex;
 const float max_torque[3] = {17.f, 17.f, 26.f};  // TODO CHECK WITH BEN
 const float wimp_torque[3] = {6.f, 6.f, 6.f};    // TODO CHECK WITH BEN
 const float disabled_torque[3] = {0.f, 0.f, 0.f};
+// SPI命令的 flags 位约定（由上层 LegController 写入）：
+// bit0=1: 使能（允许输出扭矩）；bit0=0: 失能（扭矩限制为0）
+// bit1=1: 使能后使用 wimp_torque（更小扭矩上限，软模式）
 
 // only used for actual robot
 const float abad_side_sign[4] = {-1.f, -1.f, 1.f, 1.f};
@@ -91,6 +94,8 @@ void fake_spine_control(spi_command_t *cmd, spi_data_t *data,
 
   const float *torque_limits = disabled_torque;
 
+  // 这里只是仿真/估算路径，但和真实SPI控制语义一致：
+  // flags 决定当前周期的“使能/失能”和扭矩上限模式。
   if (cmd->flags[board_num] & 0b1) {
     if (cmd->flags[board_num] & 0b10)
       torque_limits = wimp_torque;
@@ -241,6 +246,9 @@ void spi_to_spine(spi_command_t *cmd, spine_cmd_t *spine_cmd, int leg_0) {
     spine_cmd->tau_knee_ff[i] =
         cmd->tau_knee_ff[i + leg_0] * knee_side_sign[i + leg_0];
 
+    // 关键点：SPI链路没有“单独的 enable/estop 控制帧”。
+    // 每个控制周期都把 flags 跟随普通控制命令一起下发给从板。
+    // 因此使能/失能的生效时机就是“本周期命令发出时”。
     spine_cmd->flags[0] = cmd->flags[0 + leg_0];
   }
   spine_cmd->checksum = xor_checksum((uint32_t *)spine_cmd, 32);
@@ -291,6 +299,8 @@ void spi_send_receive(spi_command_t *command, spi_data_t *data) {
   uint16_t rx_buf[K_WORDS_PER_MESSAGE];
 
   for (int spi_board = 0; spi_board < 2; spi_board++) {
+    // 每次调用都会发送一帧完整的 spine_cmd（包含 q/qd/kp/kd/tau/flags）。
+    // 所以 enable/disable 不是一次性动作，而是由上层每周期持续写 flags 控制。
     // copy command into spine type:
     spi_to_spine(command, &g_spine_cmd, spi_board * 2);
 

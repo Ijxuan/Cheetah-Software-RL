@@ -57,7 +57,17 @@ static uint8_t g_joint_rr_phase __attribute__((unused)) = 0;                    
 static TiBoardData g_latest_board_data[CAN_CHANNEL_COUNT];                      // 每条CAN通道最近一次聚合后的关节状态缓存
 static bool g_board_data_inited = false;                                        // 状态缓存是否已清零初始化
 static bool g_shutdown_hook_registered = false;                                 // 退出钩子（atexit）是否已注册
-static bool g_motor_mode_first_run = true;                                      // OP后首次循环标记：用于先发使能帧
+static bool g_enable_edge_inited = false;                                       // 是否已初始化使能边沿状态机
+static bool g_prev_enable_cmd = false;                                          // 上一次收到的enable状态（来自上层_legsEnabled）
+static int g_transition_mode = 0;                                               // 0:无特殊帧 1:ENTER(FC) 2:EXIT(FD)
+static int g_transition_step = 0;                                               // 特殊帧序列当前步(0..2)
+// 四路CAN发送开关（1=发送, 0=关闭该通道发送）。
+// 通道映射：CH1->FR, CH2->FL, CH3->RR, CH4->RL
+// 测试单腿时，把其它腿对应开关置0即可（会把该通道DLC改为0）。
+static int g_can_ch1_tx_enable = 1;
+static int g_can_ch2_tx_enable = 1;
+static int g_can_ch3_tx_enable = 1;
+static int g_can_ch4_tx_enable = 1;
 static std::mutex command_mutex, data_mutex;                                    // 命令区/数据区互斥锁
 
 constexpr float kMitPMin = -12.5f;
@@ -296,6 +306,7 @@ static int can_send_fixed8(ec_slavet *slave, int channel, uint32 can_id,
                            const uint8 data[CAN_DATA_LEN_FIXED]) {
   uint16 offset = 0;
   uint8 *base = NULL;
+  int ch_enable = 1;
 
   if ((slave == NULL) || (data == NULL) || (slave->outputs == NULL)) {
     return 0;
@@ -308,10 +319,20 @@ static int can_send_fixed8(ec_slavet *slave, int channel, uint32 can_id,
   }
 
   base = slave->outputs + offset;
+  switch (channel) {
+    case 1: ch_enable = g_can_ch1_tx_enable; break;
+    case 2: ch_enable = g_can_ch2_tx_enable; break;
+    case 3: ch_enable = g_can_ch3_tx_enable; break;
+    case 4: ch_enable = g_can_ch4_tx_enable; break;
+    default: ch_enable = 1; break;
+  }
+
   memset(base, 0x00, CAN_CHANNEL_SIZE);
   write_u32_be(base, can_id);                  // 0~3: CAN ID (big-endian)
-  base[4] = CAN_DLC_FIXED;                     // 4: DLC
-  memcpy(&base[5], data, CAN_DATA_LEN_FIXED);  // 5~12: 有效负载 8 字节
+  base[4] = ch_enable ? CAN_DLC_FIXED : 0;     // 4: DLC=0 表示该通道本周期不发CAN
+  if (ch_enable) {
+    memcpy(&base[5], data, CAN_DATA_LEN_FIXED);  // 5~12: 有效负载 8 字节
+  }
   return 1;
 }
 
@@ -361,13 +382,19 @@ static void print_tx_frame(const char* prefix, uint32 can_id,
 
 // 固定场景发送函数：
 // 1 个 EtherCAT 从站，4 条 CAN（对应 4 条腿），每条 CAN 上 3 个电机 ID（1/2/3）。
-// 每次调用只发送 1 个 ID（1/2/3 中之一）到 4 条 CAN 通道。
-// 调用次数决定发几次；ID按 1->2->3->1... 自动轮转。
-static void send_same_frame_to_all_12_motors(const uint8 data[CAN_DATA_LEN_FIXED],
-                                             const char* tag) {
+// 每次调用只在 PDO 输出区写入 1 个指定槽位(slot)的 ID 到 4 条 CAN 通道。
+// 真正上总线发送由 rt_ethercat_run() 统一调用 ec_send_processdata() 完成。
+static void stage_same_frame_to_all_12_motors(const uint8 data[CAN_DATA_LEN_FIXED],
+                                              int slot,
+                                              const char* tag) {
   if (data == NULL || ec_slavecount < 1 || !ecat_initialized || !inOP) {
     return;
   }
+
+  if (slot < 0 || slot >= mit_motor_protocol::kJointCountPerLeg) {
+    return;
+  }
+  g_motor_slot = slot;
 
   ec_slavet* slave = &ec_slave[1];
   const uint32 can_id = mit_motor_protocol::kJointCanIds[g_motor_slot];
@@ -378,12 +405,8 @@ static void send_same_frame_to_all_12_motors(const uint8 data[CAN_DATA_LEN_FIXED
     }
   }
 
-  ec_send_processdata();
-  wkc = ec_receive_processdata(EC_TIMEOUTRET);
-  g_motor_slot = (g_motor_slot + 1) % mit_motor_protocol::kJointCountPerLeg;
-
   if (tag != NULL) {
-    printf("[EtherCAT] %s done (next_slot=%d)\n", tag, g_motor_slot);
+    printf("[EtherCAT] %s staged (slot=%d)\n", tag, slot);
   }
 }
 
@@ -488,8 +511,12 @@ void rt_ethercat_init(const char* ifname) {
     if (ec_slave[0].state == EC_STATE_OPERATIONAL) {
       inOP = TRUE;
       ecat_initialized = true;
-      g_motor_mode_first_run = true;
-      printf("[EtherCAT] g_motor_mode_first_run=true\n");
+      g_enable_edge_inited = false;
+      g_prev_enable_cmd = false;
+      g_transition_mode = 0;
+      g_transition_step = 0;
+      g_motor_slot = 0;
+      printf("[EtherCAT] enable-edge state reset\n");
       if (!g_shutdown_hook_registered) {
         atexit(rt_ethercat_shutdown_hook);
         g_shutdown_hook_registered = true;
@@ -527,8 +554,6 @@ static int wkc_err_iteration_count = 0;
  * In Simulation, send data over LCM
  * On the robt, verify the EtherCAT connection is still healthy, send data, receive data, and check for lost packets
  */
-  int run_times=0;
-
 void rt_ethercat_run()
 {
   if(!ecat_initialized || !inOP)
@@ -550,23 +575,6 @@ void rt_ethercat_run()
     degraded_handler();
   }
 
-  // First cyclic run after OP: send motor-mode frame to all motors once.
-  if (g_motor_mode_first_run) {
-    const uint8 motor_mode_frame[CAN_DATA_LEN_FIXED] = {
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC};
-    command_mutex.lock();
-    send_same_frame_to_all_12_motors(motor_mode_frame,
-                                     "sent motor-mode frame to all motors");
-    command_mutex.unlock();
-    run_times++;
-    if(run_times>=3)
-    {
-    g_motor_mode_first_run = false;
-    printf("[EtherCAT] g_motor_mode_first_run=false\n");
-
-    }
-  }
-else{
   //send
   command_mutex.lock();
   ec_send_processdata();
@@ -576,7 +584,6 @@ else{
   data_mutex.lock();
   wkc = ec_receive_processdata(EC_TIMEOUTRET);
   data_mutex.unlock();
-}
 
 
   //check for dropped packet
@@ -656,12 +663,67 @@ void rt_ethercat_get_data(TiBoardData* data) {
 void rt_ethercat_set_command(TiBoardCommand* command) {
   command_mutex.lock();
 
-  // Commented out control-command cyclic transmission.
-  // Keep only motor-mode (enable) transmission in rt_ethercat_run() first-run path.
-  /*  */
+  // 边沿逻辑直接使用上层 command.enable（来源于 _legsEnabled）：
+  // false->true 发送 ENTER-MODE，true->false 发送 EXIT-MODE。
+  // 这样 EtherCAT->CAN 只做转发与边沿动作，不再重复 Runner 里的 count_ini 逻辑。
 
   if (command != nullptr && ec_slavecount >= 1) {
     ec_slavet* slave = &ec_slave[1];
+    bool all_enable_equal = true;
+    const bool enable_cmd = (command[0].enable != 0);
+    for (int leg = 1; leg < CAN_CHANNEL_COUNT; leg++) {
+      if ((command[leg].enable != 0) != enable_cmd) {
+        all_enable_equal = false;
+        break;
+      }
+    }
+    if (!all_enable_equal) {
+      printf("[EtherCAT] Warning: per-leg enable mismatch, using leg0 enable=%d\n",
+             (int)enable_cmd);
+    }
+
+    if (!g_enable_edge_inited) {
+      g_enable_edge_inited = true;
+      g_prev_enable_cmd = false;
+    }
+
+    if (enable_cmd != g_prev_enable_cmd) {
+      g_transition_mode = enable_cmd ? 1 : 2;
+      g_transition_step = 0;
+      // 与 SPI->CAN 固件一致：收到边沿后立即更新本地 enable 状态。
+      g_prev_enable_cmd = enable_cmd;
+      printf("[EtherCAT] enable-edge detected, transition=%s\n",
+             enable_cmd ? "ENTER(FC)" : "EXIT(FD)");
+    }
+
+    // 特殊帧序列执行期间暂停普通控制帧，保证每个周期总线负载稳定。
+    if (g_transition_mode != 0) {
+      const uint8 enter_motor_mode_frame[CAN_DATA_LEN_FIXED] = {
+          0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC};
+      const uint8 exit_motor_mode_frame[CAN_DATA_LEN_FIXED] = {
+          0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFD};
+      // 与 SPI->CAN 旧固件顺序对齐：
+      // enable: 1->3->2; disable: 1->2->3
+      const int enable_slot_order[mit_motor_protocol::kJointCountPerLeg] = {0, 2, 1};
+      const int disable_slot_order[mit_motor_protocol::kJointCountPerLeg] = {0, 1, 2};
+      const int slot = (g_transition_mode == 1)
+                           ? enable_slot_order[g_transition_step]
+                           : disable_slot_order[g_transition_step];
+      stage_same_frame_to_all_12_motors(
+          (g_transition_mode == 1) ? enter_motor_mode_frame : exit_motor_mode_frame,
+          slot,
+          "[transition] special-frame");
+      g_transition_step++;
+      if (g_transition_step >= mit_motor_protocol::kJointCountPerLeg) {
+        g_transition_mode = 0;
+        g_transition_step = 0;
+        printf("[EtherCAT] transition finished\n");
+      }
+      (void)slave;
+      command_mutex.unlock();
+      return;
+    }
+
 // 已通过上层腿索引验证：
 //   leg[0]=前右, leg[1]=前左, leg[2]=后右, leg[3]=后左
 //（通过 Quadruped::getHipLocation 和 rt_spi 侧符号映射交叉检查）。
@@ -680,13 +742,13 @@ void rt_ethercat_set_command(TiBoardCommand* command) {
       const float motor_qd_des = robot_dq_to_motor_vel(leg, joint, leg_cmd.qd_des[joint]);
       const float motor_tau_ff = robot_tau_to_motor_tauff(leg, joint, leg_cmd.tau_ff[joint]);
 
-      if (leg_cmd.enable) {
-        mit_motor_protocol::pack_control_command(
-            motor_q_des, motor_qd_des, leg_cmd.kp_joint[joint],
-            leg_cmd.kd_joint[joint], motor_tau_ff, can_data);
-      } else {
-        mit_motor_protocol::pack_control_command(0.f, 0.f, 0.f, 0.f, 0.f, can_data);
-      }
+      const float kp_cmd = leg_cmd.enable ? leg_cmd.kp_joint[joint] : 0.f;
+      const float kd_cmd = leg_cmd.enable ? leg_cmd.kd_joint[joint] : 0.f;
+      const float tau_cmd = leg_cmd.enable ? motor_tau_ff : 0.f;
+      // 与 SPI 行为对齐：enable=0 时不发全零目标，仍下发经过方向/零位映射后的目标值；
+      // 同时将 kp/kd/tau 置零，避免闭环增益与前馈力矩生效。
+      mit_motor_protocol::pack_control_command(
+          motor_q_des, motor_qd_des, kp_cmd, kd_cmd, tau_cmd, can_data);
 
       can_send_fixed8(slave, leg + 1, can_id, can_data);
     }
