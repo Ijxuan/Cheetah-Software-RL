@@ -69,6 +69,7 @@ static int g_can_ch1_tx_enable = 1;
 static int g_can_ch2_tx_enable = 1;
 static int g_can_ch3_tx_enable = 1;
 static int g_can_ch4_tx_enable = 1;
+
 static std::mutex command_mutex, data_mutex;                                    // 命令区/数据区互斥锁
 
 constexpr float kMitPMin = -12.5f;
