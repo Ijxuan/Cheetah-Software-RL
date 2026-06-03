@@ -12,6 +12,8 @@ static pthread_mutex_t lcm_get_set_mutex =
 
 // Controller Settings
 rc_control_settings rc_control;
+float cmd_vel_vx = 0.f;
+float cmd_vel_wz = 0.f;
 
 /* ------------------------- HANDLERS ------------------------- */
 
@@ -308,13 +310,27 @@ void js_complete(int port)
     }
     if (rc_control.mode == RC_mode::RL_JOINT_PD)
     {
+
+
+
+        if (remote_control == false)
+        {
         rc_control.v_des[0] = -3.0* (float)map.ly / 32768; // 应该是前后速度
         rc_control.v_des[1] = -0.5 * (float)map.lx / 32768; // 应该 是左右速度
         rc_control.v_des[2] = 0;
         rc_control.omega_des[0] = 0;
         rc_control.omega_des[1] = 0; // pitch，俯仰角度
         rc_control.omega_des[2] =  -1.0 *(float)map.rx / 32768;  // yaw *3.0旋转角度
-    }
+        }
+        else
+        {
+        rc_control.v_des[0] = cmd_vel_vx; // 来自cmd_vel
+        rc_control.v_des[1] = 0; // 应该 是左右速度
+        rc_control.v_des[2] = 0;
+        rc_control.omega_des[0] = 0;
+        rc_control.omega_des[1] = 0; // pitch，俯仰角度
+        rc_control.omega_des[2] = cmd_vel_wz;  // 来自cmd_vel
+        }
 
     // if (rc_control.mode == RC_mode::LOCOMOTION)
     // { // 如果是运动模式
@@ -379,6 +395,7 @@ void js_complete(int port)
     {
         remote_control = false;
         printf("map.rt is  %d  remote_control close\n", map.rt); //
+    }
     }
 }
 

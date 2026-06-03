@@ -14,7 +14,7 @@
 #include "Configuration.h"
 
 #include "HardwareBridge.h"
-//#include "rt/rt_rc_interface.h"
+#include "rt/rt_rc_interface.h"
 #include "rt/rt_sbus.h"
 #include "rt/rt_spi.h"
 #include "rt/rt_vectornav.h"
@@ -130,6 +130,12 @@ void HardwareBridge::handleCmdVelLCM(const lcm::ReceiveBuffer* rbuf,
   (void)rbuf;
   (void)chan;
   (void)msg;
+
+  cmd_vel_vx = msg->vx;
+  cmd_vel_wz = msg->wz;
+  joy_new_x = msg->vx;
+  joy_new_yaw = msg->wz;
+  
   // printf("[HardwareBridge] cmd_vel_msg received on %s: vx=%.3f, wz=%.3f\n",
   //        chan.c_str(), msg->vx, msg->wz);
 }

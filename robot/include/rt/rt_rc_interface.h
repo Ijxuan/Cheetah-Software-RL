@@ -18,6 +18,10 @@ class rc_control_settings {
     double     step_height;
 };
 
+// Latest cmd_vel values from LCM.
+extern float cmd_vel_vx;
+extern float cmd_vel_wz;
+
 
 namespace RC_mode{
   constexpr int OFF = 0;

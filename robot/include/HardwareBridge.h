@@ -84,6 +84,11 @@ class HardwareBridge {
   RobotController* _controller = nullptr;
   ControlParameters* _userControlParameters = nullptr;
 
+  float joy_new_x;
+  float joy_new_y;
+  float joy_new_yaw;
+
+
   int _port;
 };
 
