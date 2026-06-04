@@ -315,7 +315,7 @@ void js_complete(int port)
 
         if (remote_control == false)
         {
-        rc_control.v_des[0] = -3.0* (float)map.ly / 32768; // 应该是前后速度
+        rc_control.v_des[0] = -1.0* (float)map.ly / 32768; // 应该是前后速度
         rc_control.v_des[1] = -0.5 * (float)map.lx / 32768; // 应该 是左右速度
         rc_control.v_des[2] = 0;
         rc_control.omega_des[0] = 0;
