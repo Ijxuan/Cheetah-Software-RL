@@ -22,6 +22,7 @@
 #include "Utilities/PeriodicTask.h"
 #include "control_parameter_request_lcmt.hpp"
 #include "control_parameter_respones_lcmt.hpp"
+#include "cmd_vel_msg.hpp"
 #include "gamepad_lcmt.hpp"
 #include "microstrain_lcmt.hpp"
 #include "ecat_command_t.hpp"
@@ -48,6 +49,8 @@ class HardwareBridge {
   ~HardwareBridge() { delete _robotRunner; }
   void handleGamepadLCM(const lcm::ReceiveBuffer* rbuf, const std::string& chan,
                         const gamepad_lcmt* msg);
+  void handleCmdVelLCM(const lcm::ReceiveBuffer* rbuf, const std::string& chan,
+                       const cmd_vel_msg* msg);
 
   void handleInterfaceLCM();
   void handleControlParameter(const lcm::ReceiveBuffer* rbuf,
@@ -80,6 +83,11 @@ class HardwareBridge {
   volatile bool _interfaceLcmQuit = false;
   RobotController* _controller = nullptr;
   ControlParameters* _userControlParameters = nullptr;
+
+  float joy_new_x;
+  float joy_new_y;
+  float joy_new_yaw;
+
 
   int _port;
 };

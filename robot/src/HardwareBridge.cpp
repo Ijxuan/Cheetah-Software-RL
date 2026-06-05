@@ -14,7 +14,7 @@
 #include "Configuration.h"
 
 #include "HardwareBridge.h"
-//#include "rt/rt_rc_interface.h"
+#include "rt/rt_rc_interface.h"
 #include "rt/rt_sbus.h"
 #include "rt/rt_spi.h"
 #include "rt/rt_vectornav.h"
@@ -55,6 +55,10 @@ void HardwareBridge::initCommon() {
   printf("[HardwareBridge] Subscribe LCM\n");
   _interfaceLCM.subscribe("interface", &HardwareBridge::handleGamepadLCM, this);
   _interfaceLCM.subscribe("interface_request", &HardwareBridge::handleControlParameter, this);
+  _interfaceLCM.subscribe("cmd_vel", &HardwareBridge::handleCmdVelLCM, this);
+  _interfaceLCM.subscribe("cmd_vel_msg", &HardwareBridge::handleCmdVelLCM, this);
+  _interfaceLCM.subscribe("CMD_VEL_LCM", &HardwareBridge::handleCmdVelLCM, this);
+  printf("[HardwareBridge] cmd_vel_msg subscribe success: channels cmd_vel, cmd_vel_msg, CMD_VEL_LCM\n");
   //_interfaceLCM.subscribe ("t265_position_msg", &HardwareBridge::handleT265LCM , this );
 
 
@@ -111,8 +115,29 @@ void HardwareBridge::handleGamepadLCM(const lcm::ReceiveBuffer* rbuf,
                                       const std::string& chan,
                                       const gamepad_lcmt* msg) {
   (void)rbuf;
-  (void)chan;
   _gamepadCommand.set(msg);
+  printf("[HardwareBridge] gamepad on %s: left=(%.3f, %.3f), right=(%.3f, %.3f)\n",
+         chan.c_str(),
+         msg->leftStickAnalog[0],
+         msg->leftStickAnalog[1],
+         msg->rightStickAnalog[0],
+         msg->rightStickAnalog[1]);
+}
+
+void HardwareBridge::handleCmdVelLCM(const lcm::ReceiveBuffer* rbuf,
+                                     const std::string& chan,
+                                     const cmd_vel_msg* msg) {
+  (void)rbuf;
+  (void)chan;
+  (void)msg;
+
+  cmd_vel_vx = msg->vx;
+  cmd_vel_wz = msg->wz;
+  joy_new_x = msg->vx;
+  joy_new_yaw = msg->wz;
+  
+  // printf("[HardwareBridge] cmd_vel_msg received on %s: vx=%.3f, wz=%.3f\n",
+  //        chan.c_str(), msg->vx, msg->wz);
 }
 
 /*!

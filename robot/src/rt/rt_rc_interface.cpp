@@ -12,6 +12,8 @@ static pthread_mutex_t lcm_get_set_mutex =
 
 // Controller Settings
 rc_control_settings rc_control;
+float cmd_vel_vx = 0.f;
+float cmd_vel_wz = 0.f;
 
 /* ------------------------- HANDLERS ------------------------- */
 
@@ -250,6 +252,7 @@ int yaw_times = 0;
 int back_time = 0;
 int advance_or_retreat = 1;
 int remote_control = false;
+int js_print_count = 0;
 
 template <typename T>
 T clamp(T value, T min_val, T max_val)
@@ -268,6 +271,15 @@ void js_complete(int port)
     int len = xbox_map_read(port, &map);
     if (len < 0)
         return;
+
+    if (++js_print_count >= 100)
+    {
+        js_print_count = 0;
+        printf("[Joystick] raw left=(%d, %d), right=(%d, %d) | norm left=(%.3f, %.3f), right=(%.3f, %.3f)\n",
+               map.lx, map.ly, map.rx, map.ry,
+               (float)map.lx / 32768.f, (float)map.ly / 32768.f,
+               (float)map.rx / 32768.f, (float)map.ry / 32768.f);
+    }
 
     if (map.rb)
     {
@@ -298,13 +310,27 @@ void js_complete(int port)
     }
     if (rc_control.mode == RC_mode::RL_JOINT_PD)
     {
-        rc_control.v_des[0] = -3.0* (float)map.ly / 32768; // 应该是前后速度
+
+
+
+        if (remote_control == false)
+        {
+        rc_control.v_des[0] = -1.0* (float)map.ly / 32768; // 应该是前后速度
         rc_control.v_des[1] = -0.5 * (float)map.lx / 32768; // 应该 是左右速度
         rc_control.v_des[2] = 0;
         rc_control.omega_des[0] = 0;
         rc_control.omega_des[1] = 0; // pitch，俯仰角度
         rc_control.omega_des[2] =  -1.0 *(float)map.rx / 32768;  // yaw *3.0旋转角度
-    }
+        }
+        else
+        {
+        rc_control.v_des[0] = cmd_vel_vx; // 来自cmd_vel
+        rc_control.v_des[1] = 0; // 应该 是左右速度
+        rc_control.v_des[2] = 0;
+        rc_control.omega_des[0] = 0;
+        rc_control.omega_des[1] = 0; // pitch，俯仰角度
+        rc_control.omega_des[2] = cmd_vel_wz;  // 来自cmd_vel
+        }
 
     // if (rc_control.mode == RC_mode::LOCOMOTION)
     // { // 如果是运动模式
@@ -370,13 +396,18 @@ void js_complete(int port)
         remote_control = false;
         printf("map.rt is  %d  remote_control close\n", map.rt); //
     }
+    }
 }
 
 int init_js()
 {
     int fd = xbox_open("/dev/input/js0");
-    if (fd > 0)
+    if (fd > 0) {
         memset(&map, 0, sizeof(xbox_map_t));
+        printf("[Joystick] opened /dev/input/js0\n");
+    } else {
+        printf("[Joystick] failed to open /dev/input/js0\n");
+    }
     rc_control.step_height = 0.4;
     rc_control.height_variation = 0;
     js_gait = 3;

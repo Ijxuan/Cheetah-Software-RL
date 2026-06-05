@@ -1,0 +1,5 @@
+struct cmd_vel_msg
+{
+    double vx;
+    double wz;
+}
