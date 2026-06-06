@@ -277,6 +277,8 @@ void FSM_State_RLJointPD<T>::commandTarget(const Vec12f& target_q_robot) {
   Mat3<float> kd = Mat3<float>::Zero();
   kp.diagonal().setConstant(rapid_rl::kKp);
   kd.diagonal().setConstant(rapid_rl::kKd);
+  kp(0, 0) = rapid_rl::kAbadHipKp;
+  kd(0, 0) = rapid_rl::kAbadHipKd;
 
   this->_data->_legController->setEnabled(true);
 
