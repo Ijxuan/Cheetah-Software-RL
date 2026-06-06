@@ -11,8 +11,8 @@
 
 namespace {
 
-constexpr int64_t kPolicyDtUs =
-    static_cast<int64_t>(rapid_rl::kPolicyDt * 1000000.0f);
+constexpr int64_t kStatePublishDtUs =
+    static_cast<int64_t>(rapid_rl::kStatePublishDt * 1000000.0f);
 constexpr int64_t kPolicyTimeoutUs = 100000;
 constexpr int64_t kPolicyWarningPeriodUs = 500000;
 constexpr int64_t kMaxStateLag = 8;
@@ -144,7 +144,7 @@ void FSM_State_RLJointPD<T>::run() {
     _emergencyStop = true;
   }
 
-  if (now_us - _lastStatePublishTimeUs >= kPolicyDtUs) {
+  if (now_us - _lastStatePublishTimeUs >= kStatePublishDtUs) {
     publishRobotState(now_us);
     _lastStatePublishTimeUs = now_us;
   }

@@ -15,6 +15,7 @@ constexpr int kActorInputDim = kObsDim + kLatentDim;
 constexpr int kActionDim = 12;
 
 constexpr float kPolicyDt = 0.02f;
+constexpr float kStatePublishDt = 0.01f;
 constexpr float kActionScale = 0.25f;
 constexpr float kHipScaleReduction = 0.5f;
 constexpr float kKp = 20.0f;
