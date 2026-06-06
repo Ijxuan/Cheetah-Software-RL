@@ -13,8 +13,10 @@ lcm-types/simulatorlcm
 lcm-types/wincontrollerlcm
 lcm-types/file_list.txt
 lcm-types/cpp/*
+!lcm-types/cpp/rl_*_lcmt.hpp
 lcm-types/lcmtypes/*
 lcm-types/python/*
+!lcm-types/python/rl_*_lcmt.py
 lcm_data/lcm_log
 lcm_data/matlab_log
 lcm_data/matlab_log_archive

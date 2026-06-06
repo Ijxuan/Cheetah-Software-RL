@@ -1,0 +1,11 @@
+struct rl_robot_state_lcmt
+{
+    int64_t timestamp_us;
+    int64_t sequence;
+    int32_t mode;
+    float projected_gravity[3];
+    float command[3];
+    float q[12];
+    float qd[12];
+    float last_action[12];
+}

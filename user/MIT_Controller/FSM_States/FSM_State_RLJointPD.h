@@ -1,81 +1,75 @@
 #ifndef FSM_STATE_RLJOINTPD_H
 #define FSM_STATE_RLJOINTPD_H
 
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <thread>
+
+#include <lcm-cpp.hpp>
+
 #include "FSM_State.h"
-#include <cstring>
-#include <experimental/filesystem>
-#include "cpuMLP.hpp"
-#include "../common/include/Controllers/StateEstimatorContainer.h"
-#include "../common/include/Controllers/LegController.h"
-#define OBSDIM 141  // TODO
-#define UNOBSDIM 11  // TODO
+#include "RapidRLPolicyConfig.h"
+#include "rl_policy_cmd_lcmt.hpp"
+#include "rl_robot_state_lcmt.hpp"
 
 /**
+ * LCM bridge state for rapid-locomotion policies.
  *
+ * The Python policy node owns Torch inference and publishes joint targets.
+ * This FSM state remains the only writer to the leg controller, so all final
+ * safety checks stay in the C++ control process.
  */
 template <typename T>
 class FSM_State_RLJointPD : public FSM_State<T> {
  public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   FSM_State_RLJointPD(ControlFSMData<T>* _controlFSMData);
+  ~FSM_State_RLJointPD();
 
-  // Behavior to be carried out when entering a state
   void onEnter();
-
-  // Run the normal behavior for the state
   void run();
-
-  // Checks for any transition triggers
   FSM_StateName checkTransition();
-
-  // Manages state specific transitions
   TransitionData<T> transition();
-
-  // Behavior to be carried out when exiting a state
   void onExit();
 
-  virtual void updateHistory();
-  virtual void updateObservation();
-  virtual void updatePreviousActions();
-  virtual const Eigen::Matrix<float, OBSDIM, 1>& getObservation();
-
  private:
-  // Keep track of the control iterations
-  int iter = 0;
-  DVec<T> _ini_jpos;
+  using Vec12f = Eigen::Matrix<float, rapid_rl::kActionDim, 1>;
 
- protected:
+  void lcmThreadLoop();
+  void handlePolicyLCM(const lcm::ReceiveBuffer* rbuf,
+                       const std::string& chan,
+                       const rl_policy_cmd_lcmt* msg);
+  void publishRobotState(int64_t now_us);
+  void commandTarget(const Vec12f& target_q_robot);
+  bool acceptLatestPolicyCommand(int64_t now_us);
+  Vec12f readRobotQ() const;
+  Vec12f readRobotQd() const;
+  Eigen::Matrix<float, 3, 1> readVelocityCommand() const;
+  bool isOrientationUnsafe() const;
 
-  float _bodyHeight;
-  Eigen::Matrix<float, 3, 1> _bodyOri;
-  Eigen::Matrix<float, 12, 1> _jointQ;
-  Eigen::Matrix<float, 3, 1> _bodyVel;
-  Eigen::Matrix<float, 3, 1> _bodyAngularVel;
-  Eigen::Matrix<float, 12, 1> _jointQd;
-  Eigen::Matrix<float, OBSDIM, 1> _obs;
-  Eigen::Matrix<float, OBSDIM + UNOBSDIM, 1> actorObs_;
-  Eigen::Matrix<float, UNOBSDIM, 1> estOut_;
-  int _obsDim, historyLength_, nJoints_, actionDim_;
-  Eigen::VectorXf _obsMean, _obsVar;
-  Eigen::VectorXf jointPosErrorHist_, jointVelHist_, historyTempMem_;
-  Eigen::VectorXf q_init;
-  Eigen::VectorXf pTarget12_, pTarget12_prev_;
-  Eigen::VectorXf previousAction_, prepreviousAction_;
-  Eigen::VectorXf footPos_;
-  Eigen::Vector3f command_;
+  lcm::LCM _stateLCM;
+  lcm::LCM _policyLCM;
+  std::thread _lcmThread;
+  std::atomic<bool> _lcmThreadRunning;
 
-  std::string _loadPath;
+  std::mutex _policyMutex;
+  rl_policy_cmd_lcmt _latestPolicyCmd;
+  bool _hasPolicyCmd = false;
+  int64_t _latestPolicyReceiveTimeUs = 0;
+  int64_t _lastAcceptedPolicySequence = -1;
 
-  std::chrono::steady_clock::time_point begin_;
-  std::chrono::steady_clock::time_point end_;
+  int64_t _stateSequence = 0;
+  int64_t _lastStatePublishTimeUs = 0;
+  int64_t _lastPolicyWarningTimeUs = 0;
 
-  rai::FuncApprox::MLP_fullyconnected<float, OBSDIM + UNOBSDIM, 12, rai::FuncApprox::ActivationType::leakyrelu> policy;
-  rai::FuncApprox::MLP_fullyconnected<float, OBSDIM, UNOBSDIM, rai::FuncApprox::ActivationType::leakyrelu> estimator;
-  double control_dt_ = 0.01;
+  Vec12f _lastActionPolicy;
+  Vec12f _lastTargetQRobot;
+  Vec12f _defaultQRobot;
 
-  bool emergency_stop = false;
+  bool _emergencyStop = false;
 
-  LegControllerCommand<float> preCommands[4];
+  LegControllerCommand<float> _preCommands[4];
 };
 
 #endif  // FSM_STATE_RLJOINTPD_H

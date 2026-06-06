@@ -1,382 +1,448 @@
-/*============================= Joint PD ==============================*/
-/**
- * FSM State that allows PD control of the joints.
- */
+/*====================== Rapid RL Joint PD Bridge ======================*/
 
 #include "FSM_State_RLJointPD.h"
-#include <Configuration.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <iostream>
-#include <thread>
-#include <unistd.h>
-#include <iomanip>
 
-/**
- * Constructor for the FSM State that passes in state specific info to
- * the generic FSM State constructor.
- *
- * @param _controlFSMData holds all of the relevant control data
- */
+#include "Utilities/utilities.h"
+
+namespace {
+
+constexpr int64_t kPolicyDtUs =
+    static_cast<int64_t>(rapid_rl::kPolicyDt * 1000000.0f);
+constexpr int64_t kPolicyTimeoutUs = 100000;
+constexpr int64_t kPolicyWarningPeriodUs = 500000;
+constexpr int64_t kMaxStateLag = 8;
+constexpr float kMaxTargetDeltaPerPolicyStep = 0.10f;
+constexpr float kMaxTargetCurrentError = 1.20f;
+constexpr float kMinAbad = -1.5f;
+constexpr float kMaxAbad = 1.5f;
+constexpr float kMinHip = -5.0f;
+constexpr float kMaxHip = 5.0f;
+constexpr float kMinKnee = -3.0f;
+constexpr float kMaxKnee = 3.0f;
+constexpr float kMaxRollPitchRad = 30.0f * static_cast<float>(M_PI) / 180.0f;
+
+int64_t monotonicTimeUs() {
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return static_cast<int64_t>(now.tv_sec) * 1000000LL +
+         static_cast<int64_t>(now.tv_nsec) / 1000LL;
+}
+
+bool finiteArray(const float* values, int count) {
+  for (int i = 0; i < count; ++i) {
+    if (!std::isfinite(values[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+float jointLowerLimit(int policy_index) {
+  const int joint = policy_index % 3;
+  if (joint == 0) return kMinAbad;
+  if (joint == 1) return kMinHip;
+  return kMinKnee;
+}
+
+float jointUpperLimit(int policy_index) {
+  const int joint = policy_index % 3;
+  if (joint == 0) return kMaxAbad;
+  if (joint == 1) return kMaxHip;
+  return kMaxKnee;
+}
+
+}  // namespace
+
 template <typename T>
-FSM_State_RLJointPD<T>::FSM_State_RLJointPD(ControlFSMData<T>* _controlFSMData)
-    : FSM_State<T>(_controlFSMData, FSM_StateName::RL_JOINT_PD, "RL_JOINT_PD"),
-        _ini_jpos(cheetah::num_act_joint), policy({512, 256, 64}), estimator({256, 128}){
+FSM_State_RLJointPD<T>::FSM_State_RLJointPD(
+    ControlFSMData<T>* _controlFSMData)
+    : FSM_State<T>(_controlFSMData, FSM_StateName::RL_JOINT_PD,
+                   "RL_JOINT_PD"),
+      _stateLCM(getLcmUrl(255)),
+      _policyLCM(getLcmUrl(255)),
+      _lcmThreadRunning(false) {
+  std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            << std::endl;
+  std::cout << "Setup rapid-locomotion LCM Joint PD bridge" << std::endl;
+  std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            << std::endl;
 
-  std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" << std::endl;
-  std::cout << "Setup Joint Position Control learned by Reinforcement Learning" << std::endl;
-  std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" << std::endl;
+  _lastActionPolicy.setZero();
+  _defaultQRobot = rapid_rl::PolicyToRobotOrder(
+      rapid_rl::DefaultJointPositionPolicyOrder());
+  _lastTargetQRobot = _defaultQRobot;
+  std::memset(&_latestPolicyCmd, 0, sizeof(_latestPolicyCmd));
 
-  std::string modelNumber = "5000";
-  _loadPath = std::string(get_current_dir_name()) + "/../actor_model/actor_" + modelNumber + ".txt";
-  policy.updateParamFromTxt(_loadPath);
-  estimator.updateParamFromTxt(std::string(get_current_dir_name()) + "/../actor_model/estimator_" + modelNumber + ".txt");
-
-  _obsDim = OBSDIM;
-  historyLength_ = 6;
-  nJoints_ = 12;
-  actionDim_ = nJoints_;
-  actorObs_.setZero(OBSDIM + UNOBSDIM);
-  estOut_.setZero(UNOBSDIM);
-
-  _obs.setZero(_obsDim);
-  _obsMean.setZero(_obsDim);
-  _obsVar.setZero(_obsDim);
-  previousAction_.setZero(actionDim_); prepreviousAction_.setZero(actionDim_);
-  footPos_.setZero(4 * 3);
-  command_.setZero();
-
-  q_init.setZero(12);
-  pTarget12_.setZero(12); pTarget12_prev_.setZero(12);
-  q_init << 0, -0.9, 1.8, 0, -0.9, 1.8, 0, -0.9, 1.8, 0, -0.9, 1.8;
-
-  std::string in_line;
-  std::ifstream obsMean_file, obsVariance_file;
-  obsMean_file.open(std::string(get_current_dir_name()) + "/../actor_model/mean" + modelNumber + ".csv");
-  obsVariance_file.open(std::string(get_current_dir_name()) + "/../actor_model/var" + modelNumber + ".csv");
-
-  if(obsMean_file.is_open()) {
-    for(int i = 0; i < _obsMean.size(); i++){
-      std::getline(obsMean_file, in_line);
-      _obsMean(i) = std::stod(in_line);
-    }
+  if (!_stateLCM.good() || !_policyLCM.good()) {
+    std::cout << "[RapidRL] ERROR: failed to initialize LCM" << std::endl;
+    return;
   }
-  if(obsVariance_file.is_open()) {
-    for(int i = 0; i < _obsVar.size(); i++){
-      std::getline(obsVariance_file, in_line);
-      _obsVar(i) = std::stod(in_line);
-    }
+
+  _policyLCM.subscribe("rl_policy_cmd",
+                       &FSM_State_RLJointPD<T>::handlePolicyLCM, this);
+  _lcmThreadRunning.store(true);
+  _lcmThread = std::thread(&FSM_State_RLJointPD<T>::lcmThreadLoop, this);
+}
+
+template <typename T>
+FSM_State_RLJointPD<T>::~FSM_State_RLJointPD() {
+  _lcmThreadRunning.store(false);
+  if (_lcmThread.joinable()) {
+    _lcmThread.join();
   }
-  obsMean_file.close();
-  obsVariance_file.close();
-
-  jointPosErrorHist_.setZero(nJoints_ * historyLength_); jointVelHist_.setZero(nJoints_ * historyLength_);
-
-  begin_ = std::chrono::steady_clock::now();
 }
 
 template <typename T>
 void FSM_State_RLJointPD<T>::onEnter() {
-  std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" << std::endl;
-  std::cout << "Start Joint Position Control learned by Reinforcement Learning" << std::endl;
-  std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" << std::endl;
-  // Default is to not transition
-  this->nextStateName = this->stateName;
+  std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            << std::endl;
+  std::cout << "Start rapid-locomotion LCM Joint PD bridge" << std::endl;
+  std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            << std::endl;
 
-  // Reset the transition data
+  this->nextStateName = this->stateName;
   this->transitionData.zero();
 
-  _obs.setZero();
-  jointPosErrorHist_.setZero(); jointVelHist_.setZero();
-  historyTempMem_.setZero();
-  for(int i = 0; i < historyLength_; i++) {
-    jointVelHist_.segment(nJoints_ * i, nJoints_) <<
-      this->_data->_legController->datas[0].qd, this->_data->_legController->datas[1].qd, this->_data->_legController->datas[2].qd, this->_data->_legController->datas[3].qd;
-  }
-  pTarget12_ << this->_data->_legController->datas[0].q, this->_data->_legController->datas[1].q, this->_data->_legController->datas[2].q, this->_data->_legController->datas[3].q;
-  previousAction_ << pTarget12_; prepreviousAction_ << pTarget12_;
-
-  for(int i=0; i<4; i++) {
-    preCommands[i].zero();
+  _stateSequence = 0;
+  _lastStatePublishTimeUs = 0;
+  _lastPolicyWarningTimeUs = 0;
+  _lastAcceptedPolicySequence = -1;
+  _lastActionPolicy.setZero();
+  _lastTargetQRobot = readRobotQ();
+  if (!_lastTargetQRobot.allFinite() || _lastTargetQRobot.norm() < 1e-4f) {
+    _lastTargetQRobot = _defaultQRobot;
   }
 
-  emergency_stop = false;
+  {
+    std::lock_guard<std::mutex> lock(_policyMutex);
+    _hasPolicyCmd = false;
+    std::memset(&_latestPolicyCmd, 0, sizeof(_latestPolicyCmd));
+    _latestPolicyReceiveTimeUs = 0;
+  }
+
+  for (int leg = 0; leg < 4; ++leg) {
+    _preCommands[leg].zero();
+  }
+
+  _emergencyStop = false;
 }
 
-/**
- * Calls the functions to be executed on each control loop iteration.
- */
 template <typename T>
 void FSM_State_RLJointPD<T>::run() {
+  const int64_t now_us = monotonicTimeUs();
 
-  if(std::acos(this->_data->_stateEstimator->getResult().rBody.transpose().row(2)(2)) > 3.1415*30./180.) {
-    std::cout << "Orientation is in bad condition!!!" << std::endl;
-    std::cout << "RL Joint PD Control mode is denied!!!" << std::endl;
-    emergency_stop = true;
+  if (isOrientationUnsafe()) {
+    if (!_emergencyStop) {
+      std::cout << "[RapidRL] Orientation is unsafe; disabling RL bridge"
+                << std::endl;
+    }
+    _emergencyStop = true;
+  }
+
+  if (now_us - _lastStatePublishTimeUs >= kPolicyDtUs) {
+    publishRobotState(now_us);
+    _lastStatePublishTimeUs = now_us;
+  }
+
+  if (_emergencyStop) {
+    this->_data->_legController->setEnabled(false);
     return;
   }
 
-  if (emergency_stop) return;  // don't start the code if it violated orientation condition
-
-  end_ = std::chrono::steady_clock::now();
-
-  if (std::chrono::duration_cast<std::chrono::microseconds>(end_ - begin_).count() > int(control_dt_ * 1000000)) {
-    begin_ = std::chrono::steady_clock::now();
-  } else {
-    for (int leg(0); leg < 4; ++leg) {
-      this->_data->_legController->commands[leg] = preCommands[leg];
-    }
-    return;
-  }
-
-  if (this->_data->controlParameters->use_rc) {
-    command_(0) =  this->_data->_desiredStateCommand->rcCommand->v_des[0];
-    command_(1) = this->_data->_desiredStateCommand->rcCommand->v_des[1];
-    command_(2) = this->_data->_desiredStateCommand->rcCommand->omega_des[2];
-    if (command_.norm() < 0.3) command_.setZero();
-  } else {
-    command_(0) = 3.2 * this->_data->_desiredStateCommand->gamepadCommand->leftStickAnalog(1);
-    if (command_(0) < 0) command_(0) *= 0.5;  // slower backward running
-    command_(1) = -this->_data->_desiredStateCommand->gamepadCommand->leftStickAnalog(0);
-    command_(2) = -2 * this->_data->_desiredStateCommand->gamepadCommand->rightStickAnalog(0);
-    command_(2) /= fmax(1., std::sqrt(std::abs(command_(0))));
-    if (command_.norm() < 0.3) command_.setZero();
-  }
-
-  // double kneeGearRatio = 9.33 / 6.;
-  bool isMinicheetah = true;  
-  /// TODO: true for the real robot, false for the simulation test
-
-  if (isMinicheetah) {
-    // this->kpMat = Vec3<T>(17, 17, 17 / (kneeGearRatio * kneeGearRatio)).asDiagonal();
-    // this->kdMat = Vec3<T>(0.4, 0.4, 0.4 / (kneeGearRatio * kneeGearRatio)).asDiagonal();
-    this->kpMat = Vec3<T>(17, 17, 17).asDiagonal();
-    this->kdMat = Vec3<T>(0.4, 0.4, 0.4).asDiagonal();
-    }
-  else {
-    this->kpMat = Vec3<T>(17, 17, 17).asDiagonal();
-    this->kdMat = Vec3<T>(0.4, 0.4, 0.4).asDiagonal();
-  }
-
-  updateObservation();
-  updateHistory();
-  updatePreviousActions();
-
-  _obs = getObservation();
-
-  for (int i = 0; i < _obs.size(); i++) {
-    _obs(i) = (_obs(i) - _obsMean(i)) / std::sqrt(_obsVar(i) + 1e-8);
-    if (_obs(i) > 10) _obs(i) = 10.0;
-    if (_obs(i) < -10) _obs(i) = -10.0;
-  }
-
-  // action scaling
-  estOut_ = estimator.forward(_obs);
-  actorObs_ << _obs, estOut_;
-  pTarget12_ = policy.forward(actorObs_);
-  pTarget12_ *= 0.1;
-  pTarget12_ += q_init;
-
-  this->_data->_legController->_legsEnabled = true;
-
-  for (int leg(0); leg < 4; ++leg) {
-    for (int jidx(0); jidx < 3; ++jidx) {
-      this->_data->_legController->commands[leg].qDes[jidx] = pTarget12_(leg * 3 + jidx);
-      this->_data->_legController->commands[leg].qdDes[jidx] = 0.;
-    }
-    this->_data->_legController->commands[leg].kpJoint = this->kpMat;
-    this->_data->_legController->commands[leg].kdJoint = this->kdMat;
-
-    preCommands[leg] = this->_data->_legController->commands[leg];
-  }
+  acceptLatestPolicyCommand(now_us);
+  commandTarget(_lastTargetQRobot);
 }
 
-/**
- * Manages which states can be transitioned into either by the user
- * commands or state event triggers.
- *
- * @return the enumerated FSM state name to transition into
- */
 template <typename T>
 FSM_StateName FSM_State_RLJointPD<T>::checkTransition() {
   this->nextStateName = this->stateName;
 
-  iter++;
-
-  // Switch FSM control mode
-  switch ((int)this->_data->controlParameters->control_mode) {
+  switch (static_cast<int>(this->_data->controlParameters->control_mode)) {
     case K_RL_JOINT_PD:
       break;
 
-      // case K_BALANCE_STAND:
-      //   // Requested change to BALANCE_STAND
-      //   this->nextStateName = FSM_StateName::BALANCE_STAND;
-
-      //   // Transition time is immediate
-      //   this->transitionDuration = 0.0;
-
-      //   break;
-
     case K_JOINT_PD:
-      // Normal operation for state based transitions
       this->nextStateName = FSM_StateName::JOINT_PD;
       break;
 
     case K_IMPEDANCE_CONTROL:
-      // Requested change to impedance control
       this->nextStateName = FSM_StateName::IMPEDANCE_CONTROL;
-
-      // Transition time is 1 second
       this->transitionDuration = 1.0;
       break;
 
     case K_STAND_UP:
-      // Requested change to impedance control
       this->nextStateName = FSM_StateName::STAND_UP;
-
-      // Transition time is immediate
       this->transitionDuration = 0.0;
       break;
 
     case K_PASSIVE:
-      // Requested change to BALANCE_STAND
       this->nextStateName = FSM_StateName::PASSIVE;
-
-      // Transition time is immediate
       this->transitionDuration = 0.0;
-
       break;
 
     case K_RECOVERY_STAND:
-      // Requested change to BALANCE_STAND
       this->nextStateName = FSM_StateName::RECOVERY_STAND;
-
-      // Transition time is immediate
       this->transitionDuration = 0.0;
+      break;
 
+    case K_BALANCE_STAND:
+      this->nextStateName = FSM_StateName::BALANCE_STAND;
+      this->transitionDuration = 0.0;
+      break;
+
+    case K_LOCOMOTION:
+      this->nextStateName = FSM_StateName::LOCOMOTION;
+      this->transitionDuration = 0.0;
       break;
 
     default:
-      std::cout << "[CONTROL FSM] Bad Request: Cannot transition from "
-                << K_RL_JOINT_PD << " to "
-                << this->_data->controlParameters->control_mode << std::endl;
+      std::cout << "[RapidRL] Bad transition request from " << K_RL_JOINT_PD
+                << " to " << this->_data->controlParameters->control_mode
+                << std::endl;
   }
 
-  // Get the next state
   return this->nextStateName;
 }
 
-/**
- * Handles the actual transition for the robot between states.
- * Returns true when the transition is completed.
- *
- * @return true if transition is complete
- */
 template <typename T>
 TransitionData<T> FSM_State_RLJointPD<T>::transition() {
-  // Switch FSM control mode
-  switch (this->nextStateName) {
-    case FSM_StateName::IMPEDANCE_CONTROL:
-
-      iter++;
-      if (iter >= this->transitionDuration * 1000) {
-        this->transitionData.done = true;
-      } else {
-        this->transitionData.done = false;
-      }
-      break;
-
-    case FSM_StateName::STAND_UP:
-      this->transitionData.done = true;
-      break;
-
-    case FSM_StateName::PASSIVE:
-      this->turnOffAllSafetyChecks();
-      this->transitionData.done = true;
-      break;
-
-    case FSM_StateName::RECOVERY_STAND:
-      this->transitionData.done = true;
-      break;
-
-    default:
-      std::cout << "[CONTROL FSM] Bad Request: Cannot transition from "
-                << K_RL_JOINT_PD << " to "
-                << this->_data->controlParameters->control_mode << std::endl;
-  }
-  // Finish transition
   this->transitionData.done = true;
-
-  // Return the transition data to the FSM
   return this->transitionData;
 }
 
-/**
- * Cleans up the state information on exiting the state.
- */
 template <typename T>
 void FSM_State_RLJointPD<T>::onExit() {
-  // Nothing to clean up when exiting
+  this->_data->_legController->setEnabled(false);
 }
 
-// template class FSM_State_JointPD<double>;
+template <typename T>
+void FSM_State_RLJointPD<T>::lcmThreadLoop() {
+  while (_lcmThreadRunning.load()) {
+    _policyLCM.handleTimeout(50);
+  }
+}
+
+template <typename T>
+void FSM_State_RLJointPD<T>::handlePolicyLCM(
+    const lcm::ReceiveBuffer* rbuf, const std::string& chan,
+    const rl_policy_cmd_lcmt* msg) {
+  (void)rbuf;
+  (void)chan;
+  std::lock_guard<std::mutex> lock(_policyMutex);
+  _latestPolicyCmd = *msg;
+  _latestPolicyReceiveTimeUs = monotonicTimeUs();
+  _hasPolicyCmd = true;
+}
+
+template <typename T>
+void FSM_State_RLJointPD<T>::publishRobotState(int64_t now_us) {
+  if (!_stateLCM.good()) {
+    return;
+  }
+
+  const Vec12f q_policy = rapid_rl::RobotToPolicyOrder(readRobotQ());
+  const Vec12f qd_policy = rapid_rl::RobotToPolicyOrder(readRobotQd());
+  const Eigen::Matrix<float, 3, 1> command = readVelocityCommand();
+  const Eigen::Matrix<float, 3, 1> projected_gravity =
+      this->_data->_stateEstimator->getResult().rBody *
+      Eigen::Matrix<float, 3, 1>(0.0f, 0.0f, -1.0f);
+
+  rl_robot_state_lcmt state;
+  state.timestamp_us = now_us;
+  state.sequence = ++_stateSequence;
+  state.mode = static_cast<int32_t>(this->_data->controlParameters->control_mode);
+
+  for (int i = 0; i < 3; ++i) {
+    state.projected_gravity[i] = projected_gravity[i];
+    state.command[i] = command[i];
+  }
+
+  for (int i = 0; i < rapid_rl::kActionDim; ++i) {
+    state.q[i] = q_policy[i];
+    state.qd[i] = qd_policy[i];
+    state.last_action[i] = _lastActionPolicy[i];
+  }
+
+  _stateLCM.publish("rl_robot_state", &state);
+}
+
+template <typename T>
+void FSM_State_RLJointPD<T>::commandTarget(const Vec12f& target_q_robot) {
+  Mat3<float> kp = Mat3<float>::Zero();
+  Mat3<float> kd = Mat3<float>::Zero();
+  kp.diagonal().setConstant(rapid_rl::kKp);
+  kd.diagonal().setConstant(rapid_rl::kKd);
+
+  this->_data->_legController->setEnabled(true);
+
+  for (int leg = 0; leg < 4; ++leg) {
+    for (int joint = 0; joint < 3; ++joint) {
+      const int idx = leg * 3 + joint;
+      this->_data->_legController->commands[leg].qDes[joint] =
+          target_q_robot[idx];
+      this->_data->_legController->commands[leg].qdDes[joint] = 0.0f;
+      this->_data->_legController->commands[leg].tauFeedForward[joint] = 0.0f;
+    }
+    this->_data->_legController->commands[leg].kpJoint = kp;
+    this->_data->_legController->commands[leg].kdJoint = kd;
+    _preCommands[leg] = this->_data->_legController->commands[leg];
+  }
+}
+
+template <typename T>
+bool FSM_State_RLJointPD<T>::acceptLatestPolicyCommand(int64_t now_us) {
+  rl_policy_cmd_lcmt cmd;
+  int64_t receive_time_us = 0;
+  {
+    std::lock_guard<std::mutex> lock(_policyMutex);
+    if (!_hasPolicyCmd) {
+      if (now_us - _lastPolicyWarningTimeUs > kPolicyWarningPeriodUs) {
+        std::cout << "[RapidRL] Waiting for rl_policy_cmd" << std::endl;
+        _lastPolicyWarningTimeUs = now_us;
+      }
+      return false;
+    }
+    cmd = _latestPolicyCmd;
+    receive_time_us = _latestPolicyReceiveTimeUs;
+  }
+
+  if (cmd.status != 1) {
+    return false;
+  }
+  if (cmd.sequence <= _lastAcceptedPolicySequence) {
+    return false;
+  }
+  if (now_us - receive_time_us > kPolicyTimeoutUs) {
+    if (now_us - _lastPolicyWarningTimeUs > kPolicyWarningPeriodUs) {
+      std::cout << "[RapidRL] Policy command timeout; holding last target"
+                << std::endl;
+      _lastPolicyWarningTimeUs = now_us;
+    }
+    return false;
+  }
+  if (_stateSequence > kMaxStateLag &&
+      cmd.state_sequence < _stateSequence - kMaxStateLag) {
+    if (now_us - _lastPolicyWarningTimeUs > kPolicyWarningPeriodUs) {
+      std::cout << "[RapidRL] Stale policy command for state seq "
+                << cmd.state_sequence << ", latest " << _stateSequence
+                << std::endl;
+      _lastPolicyWarningTimeUs = now_us;
+    }
+    return false;
+  }
+  if (!finiteArray(cmd.action, rapid_rl::kActionDim) ||
+      !finiteArray(cmd.target_q, rapid_rl::kActionDim)) {
+    std::cout << "[RapidRL] Rejecting non-finite policy command" << std::endl;
+    return false;
+  }
+
+  Vec12f action_policy;
+  Vec12f target_policy;
+  for (int i = 0; i < rapid_rl::kActionDim; ++i) {
+    action_policy[i] = cmd.action[i];
+    target_policy[i] = cmd.target_q[i];
+    if (target_policy[i] < jointLowerLimit(i) ||
+        target_policy[i] > jointUpperLimit(i)) {
+      std::cout << "[RapidRL] Rejecting target outside joint limits at index "
+                << i << ": " << target_policy[i] << std::endl;
+      return false;
+    }
+  }
+
+  Vec12f target_robot = rapid_rl::PolicyToRobotOrder(target_policy);
+  const Vec12f current_robot = readRobotQ();
+  for (int i = 0; i < rapid_rl::kActionDim; ++i) {
+    if (std::fabs(target_robot[i] - current_robot[i]) >
+        kMaxTargetCurrentError) {
+      std::cout << "[RapidRL] Rejecting target too far from current joint "
+                << i << std::endl;
+      return false;
+    }
+  }
+
+  for (int i = 0; i < rapid_rl::kActionDim; ++i) {
+    const float delta = target_robot[i] - _lastTargetQRobot[i];
+    const float limited_delta =
+        std::max(-kMaxTargetDeltaPerPolicyStep,
+                 std::min(kMaxTargetDeltaPerPolicyStep, delta));
+    _lastTargetQRobot[i] += limited_delta;
+  }
+
+  _lastActionPolicy = action_policy;
+  _lastAcceptedPolicySequence = cmd.sequence;
+  return true;
+}
+
+template <typename T>
+typename FSM_State_RLJointPD<T>::Vec12f FSM_State_RLJointPD<T>::readRobotQ()
+    const {
+  Vec12f q;
+  for (int leg = 0; leg < 4; ++leg) {
+    for (int joint = 0; joint < 3; ++joint) {
+      q[leg * 3 + joint] =
+          this->_data->_legController->datas[leg].q[joint];
+    }
+  }
+  return q;
+}
+
+template <typename T>
+typename FSM_State_RLJointPD<T>::Vec12f FSM_State_RLJointPD<T>::readRobotQd()
+    const {
+  Vec12f qd;
+  for (int leg = 0; leg < 4; ++leg) {
+    for (int joint = 0; joint < 3; ++joint) {
+      qd[leg * 3 + joint] =
+          this->_data->_legController->datas[leg].qd[joint];
+    }
+  }
+  return qd;
+}
+
+template <typename T>
+Eigen::Matrix<float, 3, 1> FSM_State_RLJointPD<T>::readVelocityCommand()
+    const {
+  Eigen::Matrix<float, 3, 1> command;
+
+  if (this->_data->controlParameters->use_rc) {
+    command[0] = static_cast<float>(
+        this->_data->_desiredStateCommand->rcCommand->v_des[0]);
+    command[1] = static_cast<float>(
+        this->_data->_desiredStateCommand->rcCommand->v_des[1]);
+    command[2] = static_cast<float>(
+        this->_data->_desiredStateCommand->rcCommand->omega_des[2]);
+  } else {
+    command[0] =
+        0.6f * this->_data->_desiredStateCommand->gamepadCommand
+                   ->leftStickAnalog[1];
+    command[1] =
+        -0.6f * this->_data->_desiredStateCommand->gamepadCommand
+                    ->leftStickAnalog[0];
+    command[2] =
+        -1.0f * this->_data->_desiredStateCommand->gamepadCommand
+                    ->rightStickAnalog[0];
+  }
+
+  command[0] = std::max(-0.6f, std::min(0.6f, command[0]));
+  command[1] = std::max(-0.6f, std::min(0.6f, command[1]));
+  command[2] = std::max(-1.0f, std::min(1.0f, command[2]));
+
+  if (command.norm() < 0.05f) {
+    command.setZero();
+  }
+  return command;
+}
+
+template <typename T>
+bool FSM_State_RLJointPD<T>::isOrientationUnsafe() const {
+  const auto& rpy = this->_data->_stateEstimator->getResult().rpy;
+  return std::fabs(rpy[0]) > kMaxRollPitchRad ||
+         std::fabs(rpy[1]) > kMaxRollPitchRad;
+}
+
 template class FSM_State_RLJointPD<float>;
-
-
-template <typename T>
-void FSM_State_RLJointPD<T>::updateHistory() {
-  historyTempMem_ = jointVelHist_;
-  jointVelHist_.head((historyLength_-1) * nJoints_) = historyTempMem_.tail((historyLength_-1) * nJoints_);
-  jointVelHist_.tail(nJoints_) = _jointQd;
-
-  historyTempMem_ = jointPosErrorHist_;
-  jointPosErrorHist_.head((historyLength_-1) * nJoints_) = historyTempMem_.tail((historyLength_-1) * nJoints_);
-  jointPosErrorHist_.tail(nJoints_) = pTarget12_ - _jointQ;
-}
-
-template <typename T>
-void FSM_State_RLJointPD<T>::updatePreviousActions() {
-  prepreviousAction_ = previousAction_;
-  previousAction_ = pTarget12_;
-}
-
-template <typename T>
-void FSM_State_RLJointPD<T>::updateObservation() {
-  // contact estimation
-  // by using threshold
-  double contactThreshold = 0.f;
-  Vec4<T> isContact; isContact.setZero();
-  isContact << ((pTarget12_(2) - _jointQ(2)) < contactThreshold),
-      ((pTarget12_(5) - _jointQ(5)) < contactThreshold),
-      ((pTarget12_(8) - _jointQ(8)) < contactThreshold),
-      ((pTarget12_(11) - _jointQ(11)) < contactThreshold);
-
-  this->_data->_stateEstimator->setContactPhase(isContact);
-
-  this->_data->_stateEstimator->run();
-  _bodyHeight = this->_data->_stateEstimator->getResult().position(2);  // body height 1
-  _bodyOri << this->_data->_stateEstimator->getResult().rBody.transpose().row(2).transpose(); // body orientation 3 cf) rBody: R_bw
-  _jointQ << this->_data->_legController->datas[0].q, this->_data->_legController->datas[1].q, this->_data->_legController->datas[2].q, this->_data->_legController->datas[3].q;  // joint angles 3 3 3 3 = 12
-  _bodyVel << this->_data->_stateEstimator->getResult().vBody;  // velocity 3
-  _bodyAngularVel << this->_data->_stateEstimator->getResult().omegaBody;  // angular velocity 3
-  _jointQd << this->_data->_legController->datas[0].qd, this->_data->_legController->datas[1].qd, this->_data->_legController->datas[2].qd, this->_data->_legController->datas[3].qd;  // joint velocity 3 3 3 3 = 12
-  footPos_ << this->_data->_quadruped->getHipLocation(0) + this->_data->_legController->datas[0].p, this->_data->_quadruped->getHipLocation(1) + this->_data->_legController->datas[1].p,
-      this->_data->_quadruped->getHipLocation(2) + this->_data->_legController->datas[2].p, this->_data->_quadruped->getHipLocation(3) + this->_data->_legController->datas[3].p;  // foot position  in the body frame 3 3 3 3 = 12
-
-}
-
-template <typename T>
-const Eigen::Matrix<float, OBSDIM, 1> & FSM_State_RLJointPD<T>::getObservation() {
-  _obs <<
-      _bodyOri,
-      _jointQ,
-      _bodyAngularVel,
-      _jointQd,
-      previousAction_,
-      prepreviousAction_,
-      jointPosErrorHist_.segment((historyLength_ - 6) * nJoints_, nJoints_), jointVelHist_.segment((historyLength_ - 6) * nJoints_, nJoints_), /// joint History 24
-      jointPosErrorHist_.segment((historyLength_ - 4) * nJoints_, nJoints_), jointVelHist_.segment((historyLength_ - 4) * nJoints_, nJoints_), /// joint History 24
-      jointPosErrorHist_.segment((historyLength_ - 2) * nJoints_, nJoints_), jointVelHist_.segment((historyLength_ - 2) * nJoints_, nJoints_), /// joint History 24
-      footPos_,  /// foot position with respect to the body COM, expressed in the body frame. 3 3 3 3
-      command_;
-
-  return _obs;
-}

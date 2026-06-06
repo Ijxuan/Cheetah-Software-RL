@@ -1,0 +1,10 @@
+struct rl_policy_cmd_lcmt
+{
+    int64_t timestamp_us;
+    int64_t sequence;
+    int64_t state_sequence;
+    int32_t status;
+    float inference_time_ms;
+    float action[12];
+    float target_q[12];
+}
