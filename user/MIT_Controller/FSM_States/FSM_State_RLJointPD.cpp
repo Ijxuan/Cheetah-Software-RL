@@ -4,10 +4,10 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #include <iostream>
 
 #include <Configuration.h>
+#include "RapidRLBuildConfig.h"
 #include "Utilities/utilities.h"
 
 namespace {
@@ -18,7 +18,6 @@ constexpr int64_t kStatePublishDtUs =
     static_cast<int64_t>(rapid_rl::kStatePublishDt * 1000000.0f);
 constexpr int64_t kPolicyTimeoutUs = 100000;
 constexpr int64_t kPolicyWarningPeriodUs = 500000;
-constexpr int64_t kMaxStateLag = 8;
 constexpr float kMaxTargetDeltaPerPolicyStep = 0.10f;
 constexpr float kMaxTargetCurrentError = 1.20f;
 constexpr float kMinAbad = -1.5f;
@@ -34,15 +33,6 @@ int64_t monotonicTimeUs() {
   clock_gettime(CLOCK_MONOTONIC, &now);
   return static_cast<int64_t>(now.tv_sec) * 1000000LL +
          static_cast<int64_t>(now.tv_nsec) / 1000LL;
-}
-
-bool finiteArray(const float* values, int count) {
-  for (int i = 0; i < count; ++i) {
-    if (!std::isfinite(values[i])) {
-      return false;
-    }
-  }
-  return true;
 }
 
 bool shouldHardStopForInference(float inference_time_ms) {
@@ -70,72 +60,47 @@ FSM_State_RLJointPD<T>::FSM_State_RLJointPD(
     ControlFSMData<T>* _controlFSMData)
     : FSM_State<T>(_controlFSMData, FSM_StateName::RL_JOINT_PD,
                    "RL_JOINT_PD"),
-      _stateLCM(getLcmUrl(255)),
-      _policyLCM(getLcmUrl(255)),
-      _lcmThreadRunning(false) {
+      _stateLCM(getLcmUrl(255)) {
   std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
             << std::endl;
-  std::cout << "Setup rapid-locomotion LCM Joint PD bridge" << std::endl;
+  std::cout << "Setup rapid-locomotion LibTorch Joint PD" << std::endl;
   std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-            << std::endl;
-
-  _policyConfig =
-      rapid_rl::LoadPolicyRuntimeConfig(THIS_COM "config/rapid-rl-policy.yaml");
-  if (!_policyConfig.valid) {
-    std::cout << "[RapidRL] ERROR: failed to load rapid RL policy config: "
-              << _policyConfig.error << std::endl;
-    return;
-  }
-  std::cout << "[RapidRL] Policy backend: "
-            << rapid_rl::PolicyBackendToString(_policyConfig.backend)
             << std::endl;
 
   _lastActionPolicy.setZero();
   _defaultQRobot = rapid_rl::PolicyToRobotOrder(
       rapid_rl::DefaultJointPositionPolicyOrder());
   _lastTargetQRobot = _defaultQRobot;
-  std::memset(&_latestPolicyCmd, 0, sizeof(_latestPolicyCmd));
 
-  if (_policyConfig.backend == rapid_rl::PolicyBackend::LCM) {
-    if (!_stateLCM.good() || !_policyLCM.good()) {
-      std::cout << "[RapidRL] ERROR: failed to initialize LCM" << std::endl;
-      return;
-    }
-    _policyLCM.subscribe("rl_policy_cmd",
-                         &FSM_State_RLJointPD<T>::handlePolicyLCM, this);
-    _lcmThreadRunning.store(true);
-    _lcmThread = std::thread(&FSM_State_RLJointPD<T>::lcmThreadLoop, this);
-    _policyReady = true;
-  } else {
-    if (_policyConfig.debug_lcm && !_stateLCM.good()) {
-      std::cout << "[RapidRL] WARNING: failed to initialize debug LCM"
-                << std::endl;
-    }
-    _libtorchRunner.reset(new rapid_rl::LibtorchPolicyRunner());
-    _policyReady = _libtorchRunner->load(_policyConfig);
-    if (!_policyReady) {
-      std::cout << "[RapidRL] ERROR: failed to load LibTorch policy: "
-                << _libtorchRunner->error() << std::endl;
-      return;
-    }
-    std::cout << "[RapidRL] Loaded LibTorch policy from "
-              << _policyConfig.checkpoint_dir << std::endl;
+  if (rapid_rl::build_config::kDebugLcmState && !_stateLCM.good()) {
+    std::cout << "[RapidRL] WARNING: failed to initialize debug LCM"
+              << std::endl;
   }
+
+  _libtorchRunner.reset(new rapid_rl::LibtorchPolicyRunner());
+  _policyReady = _libtorchRunner->load();
+  if (!_policyReady) {
+    std::cout << "[RapidRL] ERROR: failed to load LibTorch policy: "
+              << _libtorchRunner->error() << std::endl;
+    return;
+  }
+  std::cout << "[RapidRL] Loaded LibTorch policy from "
+            << _libtorchRunner->checkpointDir() << std::endl;
+  std::cout << "[RapidRL] Shapes: latent "
+            << _libtorchRunner->latentShape() << ", action "
+            << _libtorchRunner->actionShape() << std::endl;
+  std::cout << "[RapidRL] Torch CPU threads: "
+            << rapid_rl::build_config::kTorchNumThreads << std::endl;
 }
 
 template <typename T>
-FSM_State_RLJointPD<T>::~FSM_State_RLJointPD() {
-  _lcmThreadRunning.store(false);
-  if (_lcmThread.joinable()) {
-    _lcmThread.join();
-  }
-}
+FSM_State_RLJointPD<T>::~FSM_State_RLJointPD() {}
 
 template <typename T>
 void FSM_State_RLJointPD<T>::onEnter() {
   std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
             << std::endl;
-  std::cout << "Start rapid-locomotion LCM Joint PD bridge" << std::endl;
+  std::cout << "Start rapid-locomotion LibTorch Joint PD" << std::endl;
   std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
             << std::endl;
 
@@ -146,18 +111,10 @@ void FSM_State_RLJointPD<T>::onEnter() {
   _lastStatePublishTimeUs = 0;
   _lastPolicyRunTimeUs = 0;
   _lastPolicyWarningTimeUs = 0;
-  _lastAcceptedPolicySequence = -1;
   _lastActionPolicy.setZero();
   _lastTargetQRobot = readRobotQ();
   if (!_lastTargetQRobot.allFinite() || _lastTargetQRobot.norm() < 1e-4f) {
     _lastTargetQRobot = _defaultQRobot;
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(_policyMutex);
-    _hasPolicyCmd = false;
-    std::memset(&_latestPolicyCmd, 0, sizeof(_latestPolicyCmd));
-    _latestPolicyReceiveTimeUs = 0;
   }
 
   for (int leg = 0; leg < 4; ++leg) {
@@ -165,8 +122,8 @@ void FSM_State_RLJointPD<T>::onEnter() {
   }
 
   _emergencyStop = false;
-  if (!_policyConfig.valid || !_policyReady) {
-    std::cout << "[RapidRL] Policy backend is not ready; refusing RL control"
+  if (!_policyReady) {
+    std::cout << "[RapidRL] LibTorch policy is not ready; refusing RL control"
               << std::endl;
     _emergencyStop = true;
   }
@@ -187,10 +144,8 @@ void FSM_State_RLJointPD<T>::run() {
     _emergencyStop = true;
   }
 
-  const bool publish_state =
-      _policyConfig.backend == rapid_rl::PolicyBackend::LCM ||
-      _policyConfig.debug_lcm;
-  if (publish_state && now_us - _lastStatePublishTimeUs >= kStatePublishDtUs) {
+  if (rapid_rl::build_config::kDebugLcmState &&
+      now_us - _lastStatePublishTimeUs >= kStatePublishDtUs) {
     publishRobotState(now_us);
     _lastStatePublishTimeUs = now_us;
   }
@@ -200,13 +155,9 @@ void FSM_State_RLJointPD<T>::run() {
     return;
   }
 
-  if (_policyConfig.backend == rapid_rl::PolicyBackend::LIBTORCH) {
-    if (now_us - _lastPolicyRunTimeUs >= kPolicyDtUs) {
-      runLibtorchPolicy(now_us);
-      _lastPolicyRunTimeUs = now_us;
-    }
-  } else {
-    acceptLatestPolicyCommand(now_us);
+  if (now_us - _lastPolicyRunTimeUs >= kPolicyDtUs) {
+    runLibtorchPolicy(now_us);
+    _lastPolicyRunTimeUs = now_us;
   }
   if (_emergencyStop) {
     this->_data->_legController->setEnabled(false);
@@ -278,25 +229,6 @@ void FSM_State_RLJointPD<T>::onExit() {
 }
 
 template <typename T>
-void FSM_State_RLJointPD<T>::lcmThreadLoop() {
-  while (_lcmThreadRunning.load()) {
-    _policyLCM.handleTimeout(50);
-  }
-}
-
-template <typename T>
-void FSM_State_RLJointPD<T>::handlePolicyLCM(
-    const lcm::ReceiveBuffer* rbuf, const std::string& chan,
-    const rl_policy_cmd_lcmt* msg) {
-  (void)rbuf;
-  (void)chan;
-  std::lock_guard<std::mutex> lock(_policyMutex);
-  _latestPolicyCmd = *msg;
-  _latestPolicyReceiveTimeUs = monotonicTimeUs();
-  _hasPolicyCmd = true;
-}
-
-template <typename T>
 void FSM_State_RLJointPD<T>::publishRobotState(int64_t now_us) {
   if (!_stateLCM.good()) {
     return;
@@ -352,69 +284,7 @@ void FSM_State_RLJointPD<T>::commandTarget(const Vec12f& target_q_robot) {
 }
 
 template <typename T>
-bool FSM_State_RLJointPD<T>::acceptLatestPolicyCommand(int64_t now_us) {
-  rl_policy_cmd_lcmt cmd;
-  int64_t receive_time_us = 0;
-  {
-    std::lock_guard<std::mutex> lock(_policyMutex);
-    if (!_hasPolicyCmd) {
-      if (now_us - _lastPolicyWarningTimeUs > kPolicyWarningPeriodUs) {
-        std::cout << "[RapidRL] Waiting for rl_policy_cmd" << std::endl;
-        _lastPolicyWarningTimeUs = now_us;
-      }
-      return false;
-    }
-    cmd = _latestPolicyCmd;
-    receive_time_us = _latestPolicyReceiveTimeUs;
-  }
-
-  if (cmd.status != 1) {
-    return false;
-  }
-  if (cmd.sequence <= _lastAcceptedPolicySequence) {
-    return false;
-  }
-  if (now_us - receive_time_us > kPolicyTimeoutUs) {
-    if (now_us - _lastPolicyWarningTimeUs > kPolicyWarningPeriodUs) {
-      std::cout << "[RapidRL] Policy command timeout; holding last target"
-                << std::endl;
-      _lastPolicyWarningTimeUs = now_us;
-    }
-    return false;
-  }
-  if (_stateSequence > kMaxStateLag &&
-      cmd.state_sequence < _stateSequence - kMaxStateLag) {
-    if (now_us - _lastPolicyWarningTimeUs > kPolicyWarningPeriodUs) {
-      std::cout << "[RapidRL] Stale policy command for state seq "
-                << cmd.state_sequence << ", latest " << _stateSequence
-                << std::endl;
-      _lastPolicyWarningTimeUs = now_us;
-    }
-    return false;
-  }
-  if (!finiteArray(cmd.action, rapid_rl::kActionDim) ||
-      !finiteArray(cmd.target_q, rapid_rl::kActionDim)) {
-    std::cout << "[RapidRL] Rejecting non-finite policy command" << std::endl;
-    return false;
-  }
-
-  Vec12f action_policy;
-  Vec12f target_policy;
-  for (int i = 0; i < rapid_rl::kActionDim; ++i) {
-    action_policy[i] = cmd.action[i];
-    target_policy[i] = cmd.target_q[i];
-  }
-
-  if (!acceptPolicyOutput(action_policy, target_policy, false)) {
-    return false;
-  }
-  _lastAcceptedPolicySequence = cmd.sequence;
-  return true;
-}
-
-template <typename T>
 bool FSM_State_RLJointPD<T>::runLibtorchPolicy(int64_t now_us) {
-  (void)now_us;
   if (!_libtorchRunner || !_libtorchRunner->ready()) {
     std::cout << "[RapidRL] LibTorch policy is not ready; disabling RL"
               << std::endl;
@@ -440,13 +310,22 @@ bool FSM_State_RLJointPD<T>::runLibtorchPolicy(int64_t now_us) {
     return false;
   }
 
+  rapid_rl::InferenceTimingSummary timing;
+  if (_libtorchRunner->timingSummary(&timing) &&
+      (timing.count == 1 || timing.count == 50 || timing.count % 500 == 0)) {
+    std::cout << "[RapidRL] LibTorch timing count=" << timing.count
+              << " min/mean/p95/max=" << timing.min_ms << "/"
+              << timing.mean_ms << "/" << timing.p95_ms << "/"
+              << timing.max_ms << " ms" << std::endl;
+  }
+
   if (shouldHardStopForInference(inference_time_ms)) {
     std::cout << "[RapidRL] LibTorch inference exceeded hard timeout: "
               << inference_time_ms << " ms" << std::endl;
     _emergencyStop = true;
     return false;
   }
-  if (inference_time_ms > _policyConfig.max_inference_ms &&
+  if (inference_time_ms > rapid_rl::build_config::kMaxInferenceMs &&
       now_us - _lastPolicyWarningTimeUs > kPolicyWarningPeriodUs) {
     std::cout << "[RapidRL] WARNING: LibTorch inference took "
               << inference_time_ms << " ms" << std::endl;

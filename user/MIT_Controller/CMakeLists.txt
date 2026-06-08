@@ -14,33 +14,9 @@ include_directories(${CMAKE_BINARY_DIR})
 include_directories(${PROJECT_SOURCE_DIR})
 
 if(USE_LIBTORCH_RL)
-  if(LIBTORCH_ROOT)
-    set(TORCH_INCLUDE_DIRS
-      "${LIBTORCH_ROOT}/include"
-      "${LIBTORCH_ROOT}/include/torch/csrc/api/include")
-    set(TORCH_LIBRARIES
-      "${LIBTORCH_ROOT}/lib/libtorch.so"
-      "${LIBTORCH_ROOT}/lib/libtorch_cpu.so"
-      "${LIBTORCH_ROOT}/lib/libc10.so")
-    if(NOT LIBTORCH_CPU_ONLY)
-      foreach(TORCH_OPTIONAL_LIB
-          libtorch_cuda_cpp.so
-          libtorch_cuda.so
-          libtorch_cuda_cu.so
-          libc10_cuda.so)
-        if(EXISTS "${LIBTORCH_ROOT}/lib/${TORCH_OPTIONAL_LIB}")
-          list(APPEND TORCH_LIBRARIES "${LIBTORCH_ROOT}/lib/${TORCH_OPTIONAL_LIB}")
-        endif()
-      endforeach()
-    endif()
-    set(CMAKE_EXE_LINKER_FLAGS
-      "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath,${LIBTORCH_ROOT}/lib")
-  else()
-    if(NOT TORCH_FOUND)
-      find_package(Torch REQUIRED)
-    endif()
-  endif()
   include_directories(SYSTEM ${TORCH_INCLUDE_DIRS})
+  set(CMAKE_EXE_LINKER_FLAGS
+    "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath,${LIBTORCH_ROOT}/lib")
 endif()
 
 file(GLOB_RECURSE sources
@@ -48,6 +24,15 @@ file(GLOB_RECURSE sources
 "FSM_States/*.cpp" 
 "Controllers/BalanceController/*.cpp" 
 "Controllers/convexMPC/*.cpp")
+list(REMOVE_ITEM sources
+  "${CMAKE_CURRENT_SOURCE_DIR}/tools/rapid_rl_policy_benchmark.cpp"
+  "./tools/rapid_rl_policy_benchmark.cpp"
+  "tools/rapid_rl_policy_benchmark.cpp")
+foreach(MIT_CTRL_SOURCE ${sources})
+  if(MIT_CTRL_SOURCE MATCHES "rapid_rl_policy_benchmark\\.cpp$")
+    list(REMOVE_ITEM sources "${MIT_CTRL_SOURCE}")
+  endif()
+endforeach()
 
 add_subdirectory(Controllers/WBC)
 add_subdirectory(Controllers/WBC_Ctrl)
@@ -63,4 +48,10 @@ target_link_libraries(mit_ctrl stdc++fs)
 if(USE_LIBTORCH_RL)
   target_compile_definitions(mit_ctrl PRIVATE USE_LIBTORCH_RL=1)
   target_link_libraries(mit_ctrl ${TORCH_LIBRARIES})
+
+  add_executable(rapid_rl_policy_benchmark
+    tools/rapid_rl_policy_benchmark.cpp
+    FSM_States/RapidRLPolicyRunner.cpp)
+  target_compile_definitions(rapid_rl_policy_benchmark PRIVATE USE_LIBTORCH_RL=1)
+  target_link_libraries(rapid_rl_policy_benchmark ${TORCH_LIBRARIES})
 endif()

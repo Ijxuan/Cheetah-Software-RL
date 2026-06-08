@@ -2,19 +2,17 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cctype>
+#include <limits>
 #include <sstream>
 #include <sys/stat.h>
 
-#include <Configuration.h>
-#include "ParamHandler/ParamHandler.hpp"
+#include <ATen/Parallel.h>
+#include "RapidRLBuildConfig.h"
 
 namespace rapid_rl {
 namespace {
 
-bool isAbsolutePath(const std::string& path) {
-  return !path.empty() && path[0] == '/';
-}
+constexpr size_t kTimingSampleCapacity = 1000;
 
 std::string joinPath(const std::string& base, const std::string& leaf) {
   if (base.empty()) {
@@ -26,24 +24,13 @@ std::string joinPath(const std::string& base, const std::string& leaf) {
   return base + "/" + leaf;
 }
 
-std::string resolveRepoPath(const std::string& path) {
-  if (isAbsolutePath(path)) {
-    return path;
-  }
-  return joinPath(THIS_COM, path);
-}
-
-std::string lowerCopy(std::string value) {
-  std::transform(value.begin(), value.end(), value.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return value;
-}
-
-#ifdef USE_LIBTORCH_RL
 bool fileExists(const std::string& path) {
   struct stat buffer;
   return stat(path.c_str(), &buffer) == 0;
 }
+
+#ifdef USE_LIBTORCH_RL
+bool g_interop_threads_set = false;
 
 std::string tensorShapeString(const std::vector<int64_t>& sizes) {
   std::ostringstream stream;
@@ -57,119 +44,83 @@ std::string tensorShapeString(const std::vector<int64_t>& sizes) {
   stream << "]";
   return stream.str();
 }
+
+bool hasExpectedShape(const torch::Tensor& tensor, int64_t cols) {
+  return tensor.dim() == 2 && tensor.size(0) == 1 && tensor.size(1) == cols;
+}
 #endif
 
 }  // namespace
 
-std::string PolicyBackendToString(PolicyBackend backend) {
-  switch (backend) {
-    case PolicyBackend::LCM:
-      return "lcm";
-    case PolicyBackend::LIBTORCH:
-      return "libtorch";
-  }
-  return "unknown";
-}
-
-PolicyRuntimeConfig LoadPolicyRuntimeConfig(const std::string& config_path) {
-  PolicyRuntimeConfig config;
-  ParamHandler handler(config_path);
-  if (!handler.fileOpenedSuccessfully()) {
-    config.error = "failed to open " + config_path;
-    return config;
-  }
-
-  std::string backend;
-  if (!handler.getString("backend", backend)) {
-    config.error = "missing backend in " + config_path;
-    return config;
-  }
-
-  backend = lowerCopy(backend);
-  if (backend == "lcm") {
-    config.backend = PolicyBackend::LCM;
-  } else if (backend == "libtorch") {
-    config.backend = PolicyBackend::LIBTORCH;
-  } else {
-    config.error = "unsupported backend '" + backend + "'";
-    return config;
-  }
-
-  std::string checkpoint_dir;
-  if (handler.getString("checkpoint_dir", checkpoint_dir)) {
-    config.checkpoint_dir = resolveRepoPath(checkpoint_dir);
-  }
-
-  int debug_lcm = 1;
-  if (handler.getValue("debug_lcm", debug_lcm)) {
-    config.debug_lcm = debug_lcm != 0;
-  }
-
-  int warmup_iters = config.warmup_iters;
-  if (handler.getValue("warmup_iters", warmup_iters)) {
-    config.warmup_iters = std::max(0, warmup_iters);
-  }
-
-  double max_inference_ms = config.max_inference_ms;
-  if (handler.getValue("max_inference_ms", max_inference_ms)) {
-    config.max_inference_ms = static_cast<float>(std::max(0.0, max_inference_ms));
-  }
-
-  config.valid = true;
-  return config;
-}
-
-bool LibtorchPolicyRunner::load(const PolicyRuntimeConfig& config) {
+bool LibtorchPolicyRunner::load() {
   ready_ = false;
   error_.clear();
+  checkpoint_dir_ = build_config::kCheckpointDir;
+  latent_shape_ = "[]";
+  action_shape_ = "[]";
   resetHistory();
+  resetTiming();
 
 #ifndef USE_LIBTORCH_RL
-  (void)config;
   error_ = "mit_ctrl was built without USE_LIBTORCH_RL";
   return false;
 #else
-  if (config.checkpoint_dir.empty()) {
-    error_ = "checkpoint_dir is empty";
+  if (checkpoint_dir_.empty()) {
+    error_ = "rapid RL checkpoint dir is empty";
     return false;
   }
 
   const std::string adaptation_path =
-      joinPath(config.checkpoint_dir, "adaptation_module_latest.jit");
-  const std::string body_path = joinPath(config.checkpoint_dir, "body_latest.jit");
+      joinPath(checkpoint_dir_, "adaptation_module_latest.jit");
+  const std::string body_path = joinPath(checkpoint_dir_, "body_latest.jit");
   if (!fileExists(adaptation_path) || !fileExists(body_path)) {
     error_ = "missing adaptation_module_latest.jit or body_latest.jit under " +
-             config.checkpoint_dir;
+             checkpoint_dir_;
     return false;
   }
 
   try {
+    at::set_num_threads(build_config::kTorchNumThreads);
+    if (!g_interop_threads_set) {
+      at::set_num_interop_threads(1);
+      g_interop_threads_set = true;
+    }
+
     adaptation_ = torch::jit::load(adaptation_path, torch::kCPU);
     body_ = torch::jit::load(body_path, torch::kCPU);
     adaptation_.eval();
     body_.eval();
 
-    torch::NoGradGuard no_grad;
-    const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-    torch::Tensor hist = torch::zeros({1, kObsHistoryDim}, options);
-    torch::Tensor obs = torch::zeros({1, kObsDim}, options);
+    torch::InferenceMode inference_mode;
+    const auto options =
+        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+    history_tensor_ =
+        torch::from_blob(obs_history_.data(), {1, kObsHistoryDim}, options);
+    actor_input_tensor_ = torch::zeros({1, kActorInputDim}, options);
+    actor_latent_view_ =
+        actor_input_tensor_.narrow(1, kObsDim, kLatentDim);
+
     torch::Tensor latent;
     torch::Tensor action;
-    for (int i = 0; i < std::max(1, config.warmup_iters); ++i) {
-      latent = adaptation_.forward({hist}).toTensor();
-      action = body_.forward({torch::cat({obs, latent}, 1)}).toTensor();
+    const int validation_iters = std::max(1, build_config::kWarmupIters);
+    for (int i = 0; i < validation_iters; ++i) {
+      latent = adaptation_.forward({history_tensor_}).toTensor();
+      if (!hasExpectedShape(latent, kLatentDim)) {
+        error_ = "expected latent shape [1, 18], got " +
+                 tensorShapeString(latent.sizes().vec());
+        return false;
+      }
+      actor_latent_view_.copy_(latent);
+      action = body_.forward({actor_input_tensor_}).toTensor();
+      if (!hasExpectedShape(action, kActionDim)) {
+        error_ = "expected action shape [1, 12], got " +
+                 tensorShapeString(action.sizes().vec());
+        return false;
+      }
     }
 
-    if (latent.dim() != 2 || latent.size(0) != 1 || latent.size(1) != kLatentDim) {
-      error_ = "expected latent shape [1, 18], got " +
-               tensorShapeString(latent.sizes().vec());
-      return false;
-    }
-    if (action.dim() != 2 || action.size(0) != 1 || action.size(1) != kActionDim) {
-      error_ = "expected action shape [1, 12], got " +
-               tensorShapeString(action.sizes().vec());
-      return false;
-    }
+    latent_shape_ = tensorShapeString(latent.sizes().vec());
+    action_shape_ = tensorShapeString(action.sizes().vec());
   } catch (const c10::Error& e) {
     error_ = e.what();
     return false;
@@ -187,6 +138,58 @@ void LibtorchPolicyRunner::resetHistory() {
   obs_history_.fill(0.0f);
 }
 
+void LibtorchPolicyRunner::resetTiming() {
+  timing_count_ = 0;
+  timing_sum_ms_ = 0.0;
+  timing_min_ms_ = 0.0f;
+  timing_max_ms_ = 0.0f;
+  timing_samples_.clear();
+  timing_samples_.reserve(kTimingSampleCapacity);
+}
+
+void LibtorchPolicyRunner::recordTiming(float inference_time_ms) {
+  if (timing_count_ == 0) {
+    timing_min_ms_ = inference_time_ms;
+    timing_max_ms_ = inference_time_ms;
+  } else {
+    timing_min_ms_ = std::min(timing_min_ms_, inference_time_ms);
+    timing_max_ms_ = std::max(timing_max_ms_, inference_time_ms);
+  }
+  ++timing_count_;
+  timing_sum_ms_ += inference_time_ms;
+
+  if (timing_samples_.size() < kTimingSampleCapacity) {
+    timing_samples_.push_back(inference_time_ms);
+  }
+}
+
+bool LibtorchPolicyRunner::timingSummary(
+    InferenceTimingSummary* summary) const {
+  if (!summary || timing_count_ == 0) {
+    return false;
+  }
+
+  summary->count = timing_count_;
+  summary->min_ms = timing_min_ms_;
+  summary->mean_ms = static_cast<float>(
+      timing_sum_ms_ / static_cast<double>(timing_count_));
+  summary->max_ms = timing_max_ms_;
+
+  if (timing_samples_.empty()) {
+    summary->p95_ms = timing_max_ms_;
+    return true;
+  }
+
+  std::vector<float> sorted = timing_samples_;
+  std::sort(sorted.begin(), sorted.end());
+  size_t p95_index = (sorted.size() * 95 + 99) / 100;
+  if (p95_index == 0) {
+    p95_index = 1;
+  }
+  summary->p95_ms = sorted[p95_index - 1];
+  return true;
+}
+
 bool LibtorchPolicyRunner::infer(const Vec3f& projected_gravity,
                                  const Vec3f& command,
                                  const Vec12f& q_policy,
@@ -198,6 +201,15 @@ bool LibtorchPolicyRunner::infer(const Vec3f& projected_gravity,
                                  std::string* error) {
   if (error) {
     error->clear();
+  }
+  if (inference_time_ms) {
+    *inference_time_ms = 0.0f;
+  }
+  if (!action || !target_q) {
+    if (error) {
+      *error = "null output pointer passed to LibTorch policy";
+    }
+    return false;
   }
   if (!ready_) {
     if (error) {
@@ -212,9 +224,6 @@ bool LibtorchPolicyRunner::infer(const Vec3f& projected_gravity,
   (void)q_policy;
   (void)qd_policy;
   (void)last_action;
-  (void)action;
-  (void)target_q;
-  (void)inference_time_ms;
   if (error) {
     *error = "mit_ctrl was built without USE_LIBTORCH_RL";
   }
@@ -230,24 +239,22 @@ bool LibtorchPolicyRunner::infer(const Vec3f& projected_gravity,
     std::copy(obs.data(), obs.data() + kObsDim,
               obs_history_.end() - kObsDim);
 
-    torch::NoGradGuard no_grad;
-    const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-    torch::Tensor hist_t = torch::from_blob(
-        obs_history_.data(), {1, kObsHistoryDim}, options);
-    torch::Tensor obs_t = torch::from_blob(
-        const_cast<float*>(obs.data()), {1, kObsDim}, options);
-    torch::Tensor latent = adaptation_.forward({hist_t}).toTensor();
-    if (latent.dim() != 2 || latent.size(0) != 1 || latent.size(1) != kLatentDim) {
+    torch::InferenceMode inference_mode;
+    float* actor_input = actor_input_tensor_.data_ptr<float>();
+    std::copy(obs.data(), obs.data() + kObsDim, actor_input);
+
+    torch::Tensor latent = adaptation_.forward({history_tensor_}).toTensor();
+    if (!hasExpectedShape(latent, kLatentDim)) {
       if (error) {
         *error = "expected latent shape [1, 18], got " +
                  tensorShapeString(latent.sizes().vec());
       }
       return false;
     }
+    actor_latent_view_.copy_(latent);
 
-    torch::Tensor action_t = body_.forward({torch::cat({obs_t, latent}, 1)}).toTensor();
-    if (action_t.dim() != 2 || action_t.size(0) != 1 ||
-        action_t.size(1) != kActionDim) {
+    torch::Tensor action_t = body_.forward({actor_input_tensor_}).toTensor();
+    if (!hasExpectedShape(action_t, kActionDim)) {
       if (error) {
         *error = "expected action shape [1, 12], got " +
                  tensorShapeString(action_t.sizes().vec());
@@ -263,10 +270,12 @@ bool LibtorchPolicyRunner::infer(const Vec3f& projected_gravity,
     *target_q = ActionToTargetQPolicyOrder(*action);
 
     const auto end = std::chrono::steady_clock::now();
+    const float elapsed_ms =
+        std::chrono::duration<float, std::milli>(end - start).count();
     if (inference_time_ms) {
-      *inference_time_ms =
-          std::chrono::duration<float, std::milli>(end - start).count();
+      *inference_time_ms = elapsed_ms;
     }
+    recordTiming(elapsed_ms);
   } catch (const c10::Error& e) {
     if (error) {
       *error = e.what();
