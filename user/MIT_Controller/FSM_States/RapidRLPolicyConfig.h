@@ -17,7 +17,7 @@ constexpr int kActionDim = 12;
 constexpr float kPolicyDt = 0.02f;
 constexpr float kStatePublishDt = kPolicyDt;
 constexpr float kActionScale = 0.25f;
-constexpr float kHipScaleReduction = 0.5f;
+constexpr float kHipScaleReduction = 0.4f;
 constexpr float kKp = 20.0f;
 constexpr float kKd = 0.5f;
 constexpr float kAbadHipKp = 20.0f;
@@ -85,6 +85,24 @@ inline Eigen::Matrix<float, kActionDim, 1> ActionToTargetQPolicyOrder(
   scaled[6] *= kHipScaleReduction;
   scaled[9] *= kHipScaleReduction;
   return DefaultJointPositionPolicyOrder() + scaled;
+}
+
+inline Eigen::Matrix<float, kObsDim, 1> BuildObservationPolicyOrder(
+    const Eigen::Matrix<float, 3, 1>& projected_gravity,
+    const Eigen::Matrix<float, 3, 1>& command,
+    const Eigen::Matrix<float, kActionDim, 1>& q_policy,
+    const Eigen::Matrix<float, kActionDim, 1>& qd_policy,
+    const Eigen::Matrix<float, kActionDim, 1>& last_action) {
+  Eigen::Matrix<float, kObsDim, 1> obs;
+  obs.template segment<3>(0) = projected_gravity;
+  obs.template segment<3>(3) =
+      command.cwiseProduct(Eigen::Matrix<float, 3, 1>(
+          kLinVelScale, kLinVelScale, kAngVelScale));
+  obs.template segment<kActionDim>(6) =
+      (q_policy - DefaultJointPositionPolicyOrder()) * kDofPosScale;
+  obs.template segment<kActionDim>(18) = qd_policy * kDofVelScale;
+  obs.template segment<kActionDim>(30) = last_action;
+  return obs;
 }
 
 }  // namespace rapid_rl

@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -10,13 +11,14 @@
 
 #include "FSM_State.h"
 #include "RapidRLPolicyConfig.h"
+#include "RapidRLPolicyRunner.h"
 #include "rl_policy_cmd_lcmt.hpp"
 #include "rl_robot_state_lcmt.hpp"
 
 /**
  * LCM bridge state for rapid-locomotion policies.
  *
- * The Python policy node owns Torch inference and publishes joint targets.
+ * Supports both the Python+LCM bridge and the in-process LibTorch policy path.
  * This FSM state remains the only writer to the leg controller, so all final
  * safety checks stay in the C++ control process.
  */
@@ -34,6 +36,7 @@ class FSM_State_RLJointPD : public FSM_State<T> {
   void onExit();
 
  private:
+  using Vec3f = Eigen::Matrix<float, 3, 1>;
   using Vec12f = Eigen::Matrix<float, rapid_rl::kActionDim, 1>;
 
   void lcmThreadLoop();
@@ -43,15 +46,24 @@ class FSM_State_RLJointPD : public FSM_State<T> {
   void publishRobotState(int64_t now_us);
   void commandTarget(const Vec12f& target_q_robot);
   bool acceptLatestPolicyCommand(int64_t now_us);
+  bool runLibtorchPolicy(int64_t now_us);
+  bool acceptPolicyOutput(const Vec12f& action_policy,
+                          const Vec12f& target_policy,
+                          bool stop_on_reject);
   Vec12f readRobotQ() const;
   Vec12f readRobotQd() const;
-  Eigen::Matrix<float, 3, 1> readVelocityCommand() const;
+  Vec3f readVelocityCommand() const;
+  Vec3f readProjectedGravity() const;
   bool isOrientationUnsafe() const;
 
   lcm::LCM _stateLCM;
   lcm::LCM _policyLCM;
   std::thread _lcmThread;
   std::atomic<bool> _lcmThreadRunning;
+
+  rapid_rl::PolicyRuntimeConfig _policyConfig;
+  bool _policyReady = false;
+  std::unique_ptr<rapid_rl::LibtorchPolicyRunner> _libtorchRunner;
 
   std::mutex _policyMutex;
   rl_policy_cmd_lcmt _latestPolicyCmd;
@@ -61,6 +73,7 @@ class FSM_State_RLJointPD : public FSM_State<T> {
 
   int64_t _stateSequence = 0;
   int64_t _lastStatePublishTimeUs = 0;
+  int64_t _lastPolicyRunTimeUs = 0;
   int64_t _lastPolicyWarningTimeUs = 0;
 
   Vec12f _lastActionPolicy;

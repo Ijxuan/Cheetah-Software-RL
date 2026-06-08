@@ -1,0 +1,10 @@
+# backend: lcm
+# checkpoint_dir: ../rapid-locomotion-rl-main/runs/rapid-locomotion/example/train/201852.132488/checkpoints
+# debug_lcm: 1
+# warmup_iters: 20
+# max_inference_ms: 20.0
+backend: libtorch
+checkpoint_dir: ../rapid-locomotion-rl-main/runs/rapid-locomotion/example/train/201852.132488/checkpoints
+debug_lcm: 1
+warmup_iters: 20
+max_inference_ms: 20.0

@@ -7,10 +7,13 @@
 #include <cstring>
 #include <iostream>
 
+#include <Configuration.h>
 #include "Utilities/utilities.h"
 
 namespace {
 
+constexpr int64_t kPolicyDtUs =
+    static_cast<int64_t>(rapid_rl::kPolicyDt * 1000000.0f);
 constexpr int64_t kStatePublishDtUs =
     static_cast<int64_t>(rapid_rl::kStatePublishDt * 1000000.0f);
 constexpr int64_t kPolicyTimeoutUs = 100000;
@@ -40,6 +43,10 @@ bool finiteArray(const float* values, int count) {
     }
   }
   return true;
+}
+
+bool shouldHardStopForInference(float inference_time_ms) {
+  return inference_time_ms * 1000.0f > static_cast<float>(kPolicyTimeoutUs);
 }
 
 float jointLowerLimit(int policy_index) {
@@ -72,21 +79,48 @@ FSM_State_RLJointPD<T>::FSM_State_RLJointPD(
   std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
             << std::endl;
 
+  _policyConfig =
+      rapid_rl::LoadPolicyRuntimeConfig(THIS_COM "config/rapid-rl-policy.yaml");
+  if (!_policyConfig.valid) {
+    std::cout << "[RapidRL] ERROR: failed to load rapid RL policy config: "
+              << _policyConfig.error << std::endl;
+    return;
+  }
+  std::cout << "[RapidRL] Policy backend: "
+            << rapid_rl::PolicyBackendToString(_policyConfig.backend)
+            << std::endl;
+
   _lastActionPolicy.setZero();
   _defaultQRobot = rapid_rl::PolicyToRobotOrder(
       rapid_rl::DefaultJointPositionPolicyOrder());
   _lastTargetQRobot = _defaultQRobot;
   std::memset(&_latestPolicyCmd, 0, sizeof(_latestPolicyCmd));
 
-  if (!_stateLCM.good() || !_policyLCM.good()) {
-    std::cout << "[RapidRL] ERROR: failed to initialize LCM" << std::endl;
-    return;
+  if (_policyConfig.backend == rapid_rl::PolicyBackend::LCM) {
+    if (!_stateLCM.good() || !_policyLCM.good()) {
+      std::cout << "[RapidRL] ERROR: failed to initialize LCM" << std::endl;
+      return;
+    }
+    _policyLCM.subscribe("rl_policy_cmd",
+                         &FSM_State_RLJointPD<T>::handlePolicyLCM, this);
+    _lcmThreadRunning.store(true);
+    _lcmThread = std::thread(&FSM_State_RLJointPD<T>::lcmThreadLoop, this);
+    _policyReady = true;
+  } else {
+    if (_policyConfig.debug_lcm && !_stateLCM.good()) {
+      std::cout << "[RapidRL] WARNING: failed to initialize debug LCM"
+                << std::endl;
+    }
+    _libtorchRunner.reset(new rapid_rl::LibtorchPolicyRunner());
+    _policyReady = _libtorchRunner->load(_policyConfig);
+    if (!_policyReady) {
+      std::cout << "[RapidRL] ERROR: failed to load LibTorch policy: "
+                << _libtorchRunner->error() << std::endl;
+      return;
+    }
+    std::cout << "[RapidRL] Loaded LibTorch policy from "
+              << _policyConfig.checkpoint_dir << std::endl;
   }
-
-  _policyLCM.subscribe("rl_policy_cmd",
-                       &FSM_State_RLJointPD<T>::handlePolicyLCM, this);
-  _lcmThreadRunning.store(true);
-  _lcmThread = std::thread(&FSM_State_RLJointPD<T>::lcmThreadLoop, this);
 }
 
 template <typename T>
@@ -110,6 +144,7 @@ void FSM_State_RLJointPD<T>::onEnter() {
 
   _stateSequence = 0;
   _lastStatePublishTimeUs = 0;
+  _lastPolicyRunTimeUs = 0;
   _lastPolicyWarningTimeUs = 0;
   _lastAcceptedPolicySequence = -1;
   _lastActionPolicy.setZero();
@@ -130,6 +165,14 @@ void FSM_State_RLJointPD<T>::onEnter() {
   }
 
   _emergencyStop = false;
+  if (!_policyConfig.valid || !_policyReady) {
+    std::cout << "[RapidRL] Policy backend is not ready; refusing RL control"
+              << std::endl;
+    _emergencyStop = true;
+  }
+  if (_libtorchRunner) {
+    _libtorchRunner->resetHistory();
+  }
 }
 
 template <typename T>
@@ -144,7 +187,10 @@ void FSM_State_RLJointPD<T>::run() {
     _emergencyStop = true;
   }
 
-  if (now_us - _lastStatePublishTimeUs >= kStatePublishDtUs) {
+  const bool publish_state =
+      _policyConfig.backend == rapid_rl::PolicyBackend::LCM ||
+      _policyConfig.debug_lcm;
+  if (publish_state && now_us - _lastStatePublishTimeUs >= kStatePublishDtUs) {
     publishRobotState(now_us);
     _lastStatePublishTimeUs = now_us;
   }
@@ -154,7 +200,18 @@ void FSM_State_RLJointPD<T>::run() {
     return;
   }
 
-  acceptLatestPolicyCommand(now_us);
+  if (_policyConfig.backend == rapid_rl::PolicyBackend::LIBTORCH) {
+    if (now_us - _lastPolicyRunTimeUs >= kPolicyDtUs) {
+      runLibtorchPolicy(now_us);
+      _lastPolicyRunTimeUs = now_us;
+    }
+  } else {
+    acceptLatestPolicyCommand(now_us);
+  }
+  if (_emergencyStop) {
+    this->_data->_legController->setEnabled(false);
+    return;
+  }
   commandTarget(_lastTargetQRobot);
 }
 
@@ -247,10 +304,8 @@ void FSM_State_RLJointPD<T>::publishRobotState(int64_t now_us) {
 
   const Vec12f q_policy = rapid_rl::RobotToPolicyOrder(readRobotQ());
   const Vec12f qd_policy = rapid_rl::RobotToPolicyOrder(readRobotQd());
-  const Eigen::Matrix<float, 3, 1> command = readVelocityCommand();
-  const Eigen::Matrix<float, 3, 1> projected_gravity =
-      this->_data->_stateEstimator->getResult().rBody *
-      Eigen::Matrix<float, 3, 1>(0.0f, 0.0f, -1.0f);
+  const Vec3f command = readVelocityCommand();
+  const Vec3f projected_gravity = readProjectedGravity();
 
   rl_robot_state_lcmt state;
   state.timestamp_us = now_us;
@@ -348,22 +403,90 @@ bool FSM_State_RLJointPD<T>::acceptLatestPolicyCommand(int64_t now_us) {
   for (int i = 0; i < rapid_rl::kActionDim; ++i) {
     action_policy[i] = cmd.action[i];
     target_policy[i] = cmd.target_q[i];
+  }
+
+  if (!acceptPolicyOutput(action_policy, target_policy, false)) {
+    return false;
+  }
+  _lastAcceptedPolicySequence = cmd.sequence;
+  return true;
+}
+
+template <typename T>
+bool FSM_State_RLJointPD<T>::runLibtorchPolicy(int64_t now_us) {
+  (void)now_us;
+  if (!_libtorchRunner || !_libtorchRunner->ready()) {
+    std::cout << "[RapidRL] LibTorch policy is not ready; disabling RL"
+              << std::endl;
+    _emergencyStop = true;
+    return false;
+  }
+
+  const Vec12f q_policy = rapid_rl::RobotToPolicyOrder(readRobotQ());
+  const Vec12f qd_policy = rapid_rl::RobotToPolicyOrder(readRobotQd());
+  const Vec3f command = readVelocityCommand();
+  const Vec3f projected_gravity = readProjectedGravity();
+
+  Vec12f action_policy;
+  Vec12f target_policy;
+  float inference_time_ms = 0.0f;
+  std::string error;
+  if (!_libtorchRunner->infer(projected_gravity, command, q_policy, qd_policy,
+                              _lastActionPolicy, &action_policy,
+                              &target_policy, &inference_time_ms, &error)) {
+    std::cout << "[RapidRL] LibTorch inference failed: " << error
+              << std::endl;
+    _emergencyStop = true;
+    return false;
+  }
+
+  if (shouldHardStopForInference(inference_time_ms)) {
+    std::cout << "[RapidRL] LibTorch inference exceeded hard timeout: "
+              << inference_time_ms << " ms" << std::endl;
+    _emergencyStop = true;
+    return false;
+  }
+  if (inference_time_ms > _policyConfig.max_inference_ms &&
+      now_us - _lastPolicyWarningTimeUs > kPolicyWarningPeriodUs) {
+    std::cout << "[RapidRL] WARNING: LibTorch inference took "
+              << inference_time_ms << " ms" << std::endl;
+    _lastPolicyWarningTimeUs = now_us;
+  }
+
+  return acceptPolicyOutput(action_policy, target_policy, true);
+}
+
+template <typename T>
+bool FSM_State_RLJointPD<T>::acceptPolicyOutput(
+    const Vec12f& action_policy, const Vec12f& target_policy,
+    bool stop_on_reject) {
+  auto reject = [&](const std::string& reason) {
+    std::cout << "[RapidRL] Rejecting policy output: " << reason << std::endl;
+    if (stop_on_reject) {
+      _emergencyStop = true;
+    }
+    return false;
+  };
+
+  if (!action_policy.allFinite() || !target_policy.allFinite()) {
+    return reject("non-finite action or target");
+  }
+
+  for (int i = 0; i < rapid_rl::kActionDim; ++i) {
     if (target_policy[i] < jointLowerLimit(i) ||
         target_policy[i] > jointUpperLimit(i)) {
-      std::cout << "[RapidRL] Rejecting target outside joint limits at index "
-                << i << ": " << target_policy[i] << std::endl;
-      return false;
+      return reject("target outside joint limits at index " +
+                    std::to_string(i) + ": " +
+                    std::to_string(target_policy[i]));
     }
   }
 
-  Vec12f target_robot = rapid_rl::PolicyToRobotOrder(target_policy);
+  const Vec12f target_robot = rapid_rl::PolicyToRobotOrder(target_policy);
   const Vec12f current_robot = readRobotQ();
   for (int i = 0; i < rapid_rl::kActionDim; ++i) {
     if (std::fabs(target_robot[i] - current_robot[i]) >
         kMaxTargetCurrentError) {
-      std::cout << "[RapidRL] Rejecting target too far from current joint "
-                << i << std::endl;
-      return false;
+      return reject("target too far from current joint " + std::to_string(i));
     }
   }
 
@@ -376,7 +499,6 @@ bool FSM_State_RLJointPD<T>::acceptLatestPolicyCommand(int64_t now_us) {
   }
 
   _lastActionPolicy = action_policy;
-  _lastAcceptedPolicySequence = cmd.sequence;
   return true;
 }
 
@@ -407,9 +529,9 @@ typename FSM_State_RLJointPD<T>::Vec12f FSM_State_RLJointPD<T>::readRobotQd()
 }
 
 template <typename T>
-Eigen::Matrix<float, 3, 1> FSM_State_RLJointPD<T>::readVelocityCommand()
-    const {
-  Eigen::Matrix<float, 3, 1> command;
+typename FSM_State_RLJointPD<T>::Vec3f
+FSM_State_RLJointPD<T>::readVelocityCommand() const {
+  Vec3f command;
 
   if (this->_data->controlParameters->use_rc) {
     command[0] = static_cast<float>(
@@ -420,7 +542,7 @@ Eigen::Matrix<float, 3, 1> FSM_State_RLJointPD<T>::readVelocityCommand()
         this->_data->_desiredStateCommand->rcCommand->omega_des[2]);
   } else {
     command[0] =
-        0.6f * this->_data->_desiredStateCommand->gamepadCommand
+        1.6f * this->_data->_desiredStateCommand->gamepadCommand
                    ->leftStickAnalog[1];
     command[1] =
         -0.6f * this->_data->_desiredStateCommand->gamepadCommand
@@ -430,7 +552,7 @@ Eigen::Matrix<float, 3, 1> FSM_State_RLJointPD<T>::readVelocityCommand()
                     ->rightStickAnalog[0];
   }
 
-  command[0] = std::max(-0.6f, std::min(0.6f, command[0]));
+  command[0] = std::max(-1.6f, std::min(1.6f, command[0]));
   command[1] = std::max(-0.6f, std::min(0.6f, command[1]));
   command[2] = std::max(-1.0f, std::min(1.0f, command[2]));
 
@@ -438,6 +560,13 @@ Eigen::Matrix<float, 3, 1> FSM_State_RLJointPD<T>::readVelocityCommand()
     command.setZero();
   }
   return command;
+}
+
+template <typename T>
+typename FSM_State_RLJointPD<T>::Vec3f
+FSM_State_RLJointPD<T>::readProjectedGravity() const {
+  return this->_data->_stateEstimator->getResult().rBody *
+         Vec3f(0.0f, 0.0f, -1.0f);
 }
 
 template <typename T>
