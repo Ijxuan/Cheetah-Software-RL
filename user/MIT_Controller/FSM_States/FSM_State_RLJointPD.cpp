@@ -131,7 +131,7 @@ void FSM_State_RLJointPD<T>::run() {
     command_(0) =  this->_data->_desiredStateCommand->rcCommand->v_des[0];
     command_(1) = this->_data->_desiredStateCommand->rcCommand->v_des[1];
     command_(2) = this->_data->_desiredStateCommand->rcCommand->omega_des[2];
-    if (command_.norm() < 0.3) command_.setZero();
+    if (command_.norm() < 0.1) command_.setZero();
   } else {
     command_(0) = 3.2 * this->_data->_desiredStateCommand->gamepadCommand->leftStickAnalog(1);
     if (command_(0) < 0) command_(0) *= 0.5;  // slower backward running
