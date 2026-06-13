@@ -14,12 +14,94 @@ static pthread_mutex_t lcm_get_set_mutex =
 rc_control_settings rc_control;
 float cmd_vel_vx = 0.f;
 float cmd_vel_wz = 0.f;
+int remote_control = false;
+
+static pthread_mutex_t cmd_vel_mutex = PTHREAD_MUTEX_INITIALIZER;
+static std::chrono::steady_clock::time_point last_cmd_vel_time;
+static bool cmd_vel_received = false;
+static bool cmd_vel_timeout_stage1_logged = false;
+static bool cmd_vel_timeout_stage2_logged = false;
+constexpr double CMD_VEL_TIMEOUT_SEC = 1.0;
+constexpr double CMD_VEL_EXIT_TIMEOUT_SEC = 3.0;
+constexpr float CMD_VEL_LIMIT = 0.8f;
+
+void set_cmd_vel_command(float vx, float wz)
+{
+    pthread_mutex_lock(&cmd_vel_mutex);
+    cmd_vel_vx = std::max(-CMD_VEL_LIMIT, std::min(CMD_VEL_LIMIT, vx));
+    cmd_vel_wz = std::max(-CMD_VEL_LIMIT, std::min(CMD_VEL_LIMIT, wz));
+    last_cmd_vel_time = std::chrono::steady_clock::now();
+    cmd_vel_received = true;
+    cmd_vel_timeout_stage1_logged = false;
+    cmd_vel_timeout_stage2_logged = false;
+    pthread_mutex_unlock(&cmd_vel_mutex);
+}
+
+void get_cmd_vel_command(float* vx, float* wz)
+{
+    pthread_mutex_lock(&cmd_vel_mutex);
+    if (cmd_vel_received)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const double age = std::chrono::duration<double>(now - last_cmd_vel_time).count();
+        if (age > CMD_VEL_TIMEOUT_SEC)
+        {
+            cmd_vel_vx = 0.f;
+            cmd_vel_wz = 0.f;
+            if (!cmd_vel_timeout_stage1_logged)
+            {
+                printf("导航lcm数据接收TIMEOUT，阶段一，停止移动。\n");
+                cmd_vel_timeout_stage1_logged = true;
+            }
+        }
+        if (age > CMD_VEL_EXIT_TIMEOUT_SEC)
+        {
+            remote_control = false;
+                    clear_cmd_vel_command();
+
+            cmd_vel_received = false;
+            if (!cmd_vel_timeout_stage2_logged)
+            {
+                printf("导航lcm数据接收TIMEOUT，阶段二，退出导航模式。\n");
+                cmd_vel_timeout_stage2_logged = true;
+            }
+        }
+    }
+
+    if (vx) *vx = cmd_vel_vx;
+    if (wz) *wz = cmd_vel_wz;
+    pthread_mutex_unlock(&cmd_vel_mutex);
+}
+
+void clear_cmd_vel_command()
+{
+    pthread_mutex_lock(&cmd_vel_mutex);
+    cmd_vel_vx = 0.f;
+    cmd_vel_wz = 0.f;
+    cmd_vel_received = false;
+    cmd_vel_timeout_stage1_logged = false;
+    cmd_vel_timeout_stage2_logged = false;
+    pthread_mutex_unlock(&cmd_vel_mutex);
+}
 
 /* ------------------------- HANDLERS ------------------------- */
 
 // Controller Settings
 void get_rc_control_settings(void *settings)
 {
+    if (remote_control && rc_control.mode == RC_mode::RL_JOINT_PD)
+    {
+        float cmd_vx = 0.f;
+        float cmd_wz = 0.f;
+        get_cmd_vel_command(&cmd_vx, &cmd_wz);
+        rc_control.v_des[0] = cmd_vx;
+        rc_control.v_des[1] = 0;
+        rc_control.v_des[2] = 0;
+        rc_control.omega_des[0] = 0;
+        rc_control.omega_des[1] = 0;
+        rc_control.omega_des[2] = cmd_wz;
+    }
+
     pthread_mutex_lock(&lcm_get_set_mutex);
     v_memcpy(settings, &rc_control, sizeof(rc_control_settings));
     pthread_mutex_unlock(&lcm_get_set_mutex);
@@ -251,7 +333,6 @@ int js_gait = 3;
 int yaw_times = 0;
 int back_time = 0;
 int advance_or_retreat = 1;
-int remote_control = false;
 int js_print_count = 0;
 
 template <typename T>
@@ -322,15 +403,8 @@ void js_complete(int port)
         rc_control.omega_des[1] = 0; // pitch，俯仰角度
         rc_control.omega_des[2] =  -1.0 *(float)map.rx / 32768;  // yaw *3.0旋转角度
         }
-        else
-        {
-        rc_control.v_des[0] = cmd_vel_vx; // 来自cmd_vel
-        rc_control.v_des[1] = 0; // 应该 是左右速度
-        rc_control.v_des[2] = 0;
-        rc_control.omega_des[0] = 0;
-        rc_control.omega_des[1] = 0; // pitch，俯仰角度
-        rc_control.omega_des[2] = cmd_vel_wz;  // 来自cmd_vel
-        }
+        // remote_control == true 时，导航速度由 get_rc_control_settings()
+        // 按控制循环周期刷新，避免依赖 joystick 事件。
 
     // if (rc_control.mode == RC_mode::LOCOMOTION)
     // { // 如果是运动模式
@@ -389,11 +463,13 @@ void js_complete(int port)
     if (map.rb)
     {
         remote_control = true;
+        clear_cmd_vel_command();
         printf("rb is down  remote_control open\n"); //
     }
     if (map.rt > 15000)
     {
         remote_control = false;
+        clear_cmd_vel_command();
         printf("map.rt is  %d  remote_control close\n", map.rt); //
     }
     }

@@ -21,6 +21,9 @@ class rc_control_settings {
 // Latest cmd_vel values from LCM.
 extern float cmd_vel_vx;
 extern float cmd_vel_wz;
+void set_cmd_vel_command(float vx, float wz);
+void get_cmd_vel_command(float* vx, float* wz);
+void clear_cmd_vel_command();
 
 
 namespace RC_mode{

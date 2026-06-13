@@ -36,6 +36,8 @@ class FSM_State_RecoveryStand : public FSM_State<T> {
   static constexpr int StandUp = 0;
   static constexpr int FoldLegs = 1;
   static constexpr int RollOver = 2;
+  static constexpr int ReturnInitialJPos = 3;
+  static constexpr int WaitBeforeStandUp = 4;
 
   unsigned long long _state_iter;
   int _flag = FoldLegs;
@@ -45,6 +47,8 @@ class FSM_State_RecoveryStand : public FSM_State<T> {
   Vec3<T> stand_jpos[4];
   Vec3<T> rolling_jpos[4];
   Vec3<T> initial_jpos[4];
+  Vec3<T> recovery_initial_jpos[4];
+  Vec3<T> return_initial_start_jpos[4];
   Vec3<T> zero_vec3;
 
   Vec3<T> f_ff;
@@ -70,10 +74,14 @@ class FSM_State_RecoveryStand : public FSM_State<T> {
 
   const int standup_ramp_iter = 250;
   const int standup_settle_iter = 250;
+  const int fold_wait_iter = 1000; // 2 seconds at 0.5 kHz
+  const int rollover_disabled_wait_iter = 1000; // 2 seconds at 0.5 kHz
 
   void _RollOver(const int & iter);
   void _StandUp(const int & iter);
   void _FoldLegs(const int & iter);
+  void _ReturnInitialJPos(const int & iter);
+  void _WaitBeforeStandUp(const int & iter);
 
   bool _UpsideDown();
   void _SetJPosInterPts(

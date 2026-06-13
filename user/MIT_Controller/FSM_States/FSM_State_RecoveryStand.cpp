@@ -61,6 +61,7 @@ void FSM_State_RecoveryStand<T>::onEnter() {
   // initial configuration, position
   for(size_t i(0); i < 4; ++i) {
     initial_jpos[i] = this->_data->_legController->datas[i].q;
+    recovery_initial_jpos[i] = initial_jpos[i];
   }
 
   T body_height = 
@@ -68,14 +69,9 @@ void FSM_State_RecoveryStand<T>::onEnter() {
 
   _flag = FoldLegs;
   if( !_UpsideDown() ) { // Proper orientation
-    if (  (0.2 < body_height) && (body_height < 0.45) ){
-      printf("[Recovery Balance] body height is %f; Stand Up \n", body_height);
-      _flag = StandUp;
-    }else{
-      printf("[Recovery Balance] body height is %f; Folding legs \n", body_height);
-    }
+    printf("[Recovery Balance] body height is %f; Folding legs \n", body_height);
   }else{
-      printf("[Recovery Balance] UpsideDown (%d) \n", _UpsideDown() );
+    printf("[Recovery Balance] UpsideDown (%d); Folding legs \n", _UpsideDown() );
   }
   _motion_start_iter = 0;
 }
@@ -105,6 +101,12 @@ void FSM_State_RecoveryStand<T>::run() {
       break;
     case RollOver:
       _RollOver(_state_iter - _motion_start_iter);
+      break;
+    case ReturnInitialJPos:
+      _ReturnInitialJPos(_state_iter - _motion_start_iter);
+      break;
+    case WaitBeforeStandUp:
+      _WaitBeforeStandUp(_state_iter - _motion_start_iter);
       break;
   }
 
@@ -146,16 +148,54 @@ void FSM_State_RecoveryStand<T>::_SetJPosInterPts(
 template <typename T>
 void FSM_State_RecoveryStand<T>::_RollOver(const int & curr_iter){
 
-  for(size_t i(0); i<4; ++i){
-    _SetJPosInterPts(curr_iter, rollover_ramp_iter, i, 
-        initial_jpos[i], rolling_jpos[i]);
+  (void)curr_iter;
+
+  // RollOver is intentionally disabled. Keep the old implementation commented
+  // out so this state cannot command the rolling joint positions.
+  /*
+    for(size_t i(0); i<4; ++i){
+      _SetJPosInterPts(curr_iter, rollover_ramp_iter, i,
+          initial_jpos[i], rolling_jpos[i]);
+    }
+
+    if(curr_iter > rollover_ramp_iter + rollover_settle_iter){
+      _flag = FoldLegs;
+      for(size_t i(0); i<4; ++i) initial_jpos[i] = rolling_jpos[i];
+      _motion_start_iter = _state_iter+1;
+    }
+  */
+}
+
+template <typename T>
+void FSM_State_RecoveryStand<T>::_ReturnInitialJPos(const int & curr_iter){
+
+  if(curr_iter < rollover_disabled_wait_iter){
+    for(size_t i(0); i<4; ++i){
+      this->jointPDControl(i, return_initial_start_jpos[i], zero_vec3);
+    }
+    return;
   }
 
-  if(curr_iter > rollover_ramp_iter + rollover_settle_iter){
-    _flag = FoldLegs;
-    for(size_t i(0); i<4; ++i) initial_jpos[i] = rolling_jpos[i];
-    _motion_start_iter = _state_iter+1;
+  int return_iter = curr_iter - rollover_disabled_wait_iter;
+  for(size_t i(0); i<4; ++i){
+    _SetJPosInterPts(return_iter, fold_ramp_iter, i,
+        return_initial_start_jpos[i], recovery_initial_jpos[i]);
   }
+}
+
+template <typename T>
+void FSM_State_RecoveryStand<T>::_WaitBeforeStandUp(const int & curr_iter){
+
+  if(curr_iter < fold_wait_iter){
+    for(size_t i(0); i<4; ++i){
+      this->jointPDControl(i, fold_jpos[i], zero_vec3);
+    }
+    return;
+  }
+
+  _flag = StandUp;
+  for(size_t i(0); i<4; ++i) initial_jpos[i] = fold_jpos[i];
+  _motion_start_iter = _state_iter + 1;
 }
 
 template <typename T>
@@ -204,10 +244,13 @@ void FSM_State_RecoveryStand<T>::_FoldLegs(const int & curr_iter){
   }
   if(curr_iter >= fold_ramp_iter + fold_settle_iter){
     if(_UpsideDown()){
-      _flag = RollOver;
-      for(size_t i(0); i<4; ++i) initial_jpos[i] = fold_jpos[i];
+      printf("请检查陀螺仪姿态，不然我肘死你。\n");
+      _flag = ReturnInitialJPos;
+      for(size_t i(0); i<4; ++i) {
+        return_initial_start_jpos[i] = this->_data->_legController->datas[i].q;
+      }
     }else{
-      _flag = StandUp;
+      _flag = WaitBeforeStandUp;
       for(size_t i(0); i<4; ++i) initial_jpos[i] = fold_jpos[i];
     }
     _motion_start_iter = _state_iter + 1;
