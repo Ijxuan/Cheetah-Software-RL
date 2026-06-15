@@ -17,6 +17,10 @@ if(USE_LIBTORCH_RL)
   include_directories(SYSTEM ${TORCH_INCLUDE_DIRS})
   set(CMAKE_EXE_LINKER_FLAGS
     "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath,${LIBTORCH_ROOT}/lib")
+  if(LIBTORCH_MKL_ROOT)
+    set(CMAKE_EXE_LINKER_FLAGS
+      "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath,${LIBTORCH_MKL_ROOT}")
+  endif()
 endif()
 
 file(GLOB_RECURSE sources

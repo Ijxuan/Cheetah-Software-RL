@@ -1,6 +1,7 @@
 Reference/
 build/
 build-libtorch/
+build-cpu/
 mc-build/
 cmake-build-debug/
 .idea/

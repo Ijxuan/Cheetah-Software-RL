@@ -19,6 +19,7 @@ set(BUILD_TYPE_RELEASE TRUE)
 option(NO_SIM "Do not build simulator" OFF)
 option(USE_LIBTORCH_RL "Build the MIT controller with the in-process LibTorch RL backend" ON)
 set(LIBTORCH_ROOT "" CACHE PATH "LibTorch package root used for RL_JOINT_PD deployment")
+set(LIBTORCH_MKL_ROOT "" CACHE PATH "Optional directory containing Intel MKL shared libraries required by some CPU LibTorch packages")
 option(LIBTORCH_CPU_ONLY "Require a CPU-only LibTorch package for RL_JOINT_PD" ON)
 set(LIBTORCH_CXX11_ABI "" CACHE STRING "Explicit _GLIBCXX_USE_CXX11_ABI value for LibTorch if Torch cannot report it")
 set(RAPID_RL_CHECKPOINT_DIR "${PROJECT_SOURCE_DIR}/rl-checkpoints" CACHE PATH "Directory containing rapid RL TorchScript checkpoints")
@@ -102,6 +103,32 @@ set(TORCH_LIBRARIES
   "${LIBTORCH_ROOT}/lib/libtorch.so"
   "${LIBTORCH_ROOT}/lib/libtorch_cpu.so"
   "${LIBTORCH_ROOT}/lib/libc10.so")
+
+if(LIBTORCH_CPU_ONLY AND LIBTORCH_MKL_ROOT)
+  if(NOT IS_DIRECTORY "${LIBTORCH_MKL_ROOT}")
+    message(FATAL_ERROR "LIBTORCH_MKL_ROOT does not exist: ${LIBTORCH_MKL_ROOT}")
+  endif()
+
+  function(append_rapid_rl_mkl_library var_suffix lib_name versioned_name)
+    unset(RAPID_RL_MKL_${var_suffix} CACHE)
+    find_library(RAPID_RL_MKL_${var_suffix}
+      NAMES ${lib_name} ${versioned_name}
+      PATHS "${LIBTORCH_MKL_ROOT}"
+      NO_DEFAULT_PATH)
+    if(NOT RAPID_RL_MKL_${var_suffix})
+      message(FATAL_ERROR
+        "LIBTORCH_MKL_ROOT is missing ${lib_name}: ${LIBTORCH_MKL_ROOT}")
+    endif()
+    set(TORCH_LIBRARIES "${TORCH_LIBRARIES};${RAPID_RL_MKL_${var_suffix}}"
+      PARENT_SCOPE)
+  endfunction()
+
+  append_rapid_rl_mkl_library(INTEL_LP64 mkl_intel_lp64 libmkl_intel_lp64.so.2)
+  append_rapid_rl_mkl_library(GNU_THREAD mkl_gnu_thread libmkl_gnu_thread.so.2)
+  append_rapid_rl_mkl_library(CORE mkl_core libmkl_core.so.2)
+  list(APPEND TORCH_LIBRARIES ${CMAKE_DL_LIBS} pthread m)
+endif()
+
 if(NOT LIBTORCH_CPU_ONLY)
   foreach(RAPID_RL_TORCH_OPTIONAL_LIB
       libtorch_cuda_cpp.so
