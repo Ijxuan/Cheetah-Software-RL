@@ -4,6 +4,7 @@ build-libtorch/
 build-cpu/
 mc-build/
 cmake-build-debug/
+.deps/
 .idea/
 .history/
 lcm-types/cheetahlcm
