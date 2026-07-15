@@ -7,28 +7,78 @@
 
 namespace rapid_rl {
 
-constexpr int kObsDim = 42;
-constexpr int kHistoryLength = 15;
-constexpr int kObsHistoryDim = kObsDim * kHistoryLength;
-constexpr int kLatentDim = 18;
-constexpr int kActorInputDim = kObsDim + kLatentDim;
+constexpr int kBaseLinearVelocityOffset = 0;
+constexpr int kBaseAngularVelocityOffset = 3;
+constexpr int kProjectedGravityOffset = 6;
+constexpr int kCommandOffset = 9;
+constexpr int kDofPositionOffset = 12;
+constexpr int kDofVelocityOffset = 24;
+constexpr int kLastActionOffset = 36;
+constexpr int kHeightObservationOffset = 48;
+constexpr int kHeightObservationDim = 187;
+constexpr int kObsDim = kHeightObservationOffset + kHeightObservationDim;
 constexpr int kActionDim = 12;
 
 constexpr float kPolicyDt = 0.02f;
 constexpr float kStatePublishDt = kPolicyDt;
-constexpr float kActionScale = 0.25f;
-constexpr float kHipScaleReduction = 0.4f;
-constexpr float kKp = 20.0f;
-constexpr float kKd = 0.5f;
-constexpr float kAbadHipKp = 20.0f;
-constexpr float kAbadHipKd = 0.5f;
+constexpr float kActionScale = 0.1f;
+
+// PD gains belong to three different environments and must never be treated as
+// one interchangeable setting.  The training profile is policy metadata only;
+// RuntimePdGainProfile() can select only simulator or real-robot gains.
+enum class PdGainProfile {
+  kTraining,
+  kSimulator,
+  kRealRobot,
+};
+
+struct JointPdGains {
+  float kp;
+  float kd;
+};
+
+// Isaac Gym training gains.  These describe how the actor was trained, but are
+// never sent to the Cheetah controller by RuntimePdGainProfile().
+constexpr float kTrainingHipThighKp = 17.0f;
+constexpr float kTrainingHipThighKd = 0.4f;
+constexpr float kTrainingCalfKp = 34.0f;
+constexpr float kTrainingCalfKd = 0.8f;
+
+// Cheetah simulator gains.  Keep these as independent constants even while
+// their current values match the real robot, so simulator tuning cannot alter
+// the validated hardware profile.
+constexpr float kSimulatorAbadKp = 20.0f;
+constexpr float kSimulatorAbadKd = 0.5f;
+constexpr float kSimulatorThighKp = 20.0f;
+constexpr float kSimulatorThighKd = 0.5f;
+constexpr float kSimulatorCalfKp = 20.0f;
+constexpr float kSimulatorCalfKd = 0.5f;
+
+// Real Mini Cheetah gains preserved from the previously deployed and validated
+// RL_JOINT_PD controller.  Do not replace these with training/simulator gains.
+constexpr float kRealRobotAbadKp = 20.0f;
+constexpr float kRealRobotAbadKd = 0.5f;
+constexpr float kRealRobotThighKp = 20.0f;
+constexpr float kRealRobotThighKd = 0.5f;
+constexpr float kRealRobotCalfKp = 20.0f;
+constexpr float kRealRobotCalfKd = 0.5f;
 constexpr float kDofPosScale = 1.0f;
 constexpr float kDofVelScale = 0.05f;
 constexpr float kLinVelScale = 2.0f;
 constexpr float kAngVelScale = 0.25f;
+constexpr float kHeightScale = 5.0f;
+constexpr float kHeightReferenceOffset = 0.5f;
+constexpr float kClipObservations = 100.0f;
+constexpr float kClipActions = 100.0f;
+
+static_assert(kObsDim == 235, "legged_gym Mini Cheetah policy expects 235 observations");
+
+inline float Clamp(float value, float lower, float upper) {
+  return value < lower ? lower : (value > upper ? upper : value);
+}
 
 // Policy order follows the mini_cheetah DOF order observed in Isaac Gym:
-// FL, FR, RL, RR; each leg is abad/hip, thigh, calf.
+// FL, FR, RL, RR; each leg is hip/abad, thigh, calf.
 // The local controller order is FR, FL, RR, RL.
 inline const std::array<int, kActionDim>& PolicyToRobotMap() {
   static const std::array<int, kActionDim> map = {
@@ -77,31 +127,101 @@ inline Eigen::Matrix<float, kActionDim, 1> PolicyToRobotOrder(
   return robot_order;
 }
 
+inline Eigen::Matrix<float, kActionDim, 1> ClipPolicyAction(
+    const Eigen::Matrix<float, kActionDim, 1>& action) {
+  Eigen::Matrix<float, kActionDim, 1> clipped;
+  for (int i = 0; i < kActionDim; ++i) {
+    clipped[i] = Clamp(action[i], -kClipActions, kClipActions);
+  }
+  return clipped;
+}
+
 inline Eigen::Matrix<float, kActionDim, 1> ActionToTargetQPolicyOrder(
     const Eigen::Matrix<float, kActionDim, 1>& action) {
-  Eigen::Matrix<float, kActionDim, 1> scaled = action * kActionScale;
-  scaled[0] *= kHipScaleReduction;
-  scaled[3] *= kHipScaleReduction;
-  scaled[6] *= kHipScaleReduction;
-  scaled[9] *= kHipScaleReduction;
-  return DefaultJointPositionPolicyOrder() + scaled;
+  return DefaultJointPositionPolicyOrder() +
+         ClipPolicyAction(action) * kActionScale;
+}
+
+inline PdGainProfile RuntimePdGainProfile(bool simulated) {
+  return simulated ? PdGainProfile::kSimulator : PdGainProfile::kRealRobot;
+}
+
+inline const char* PdGainProfileName(PdGainProfile profile) {
+  switch (profile) {
+    case PdGainProfile::kTraining:
+      return "training-metadata";
+    case PdGainProfile::kSimulator:
+      return "cheetah-simulator";
+    case PdGainProfile::kRealRobot:
+      return "real-mini-cheetah";
+  }
+  return "unknown";
+}
+
+inline JointPdGains JointPdGainsForProfile(PdGainProfile profile,
+                                           int policy_index) {
+  const int joint = policy_index % 3;
+  switch (profile) {
+    case PdGainProfile::kTraining:
+      return joint == 2
+                 ? JointPdGains{kTrainingCalfKp, kTrainingCalfKd}
+                 : JointPdGains{kTrainingHipThighKp, kTrainingHipThighKd};
+    case PdGainProfile::kSimulator:
+      if (joint == 0) {
+        return JointPdGains{kSimulatorAbadKp, kSimulatorAbadKd};
+      }
+      if (joint == 1) {
+        return JointPdGains{kSimulatorThighKp, kSimulatorThighKd};
+      }
+      return JointPdGains{kSimulatorCalfKp, kSimulatorCalfKd};
+    case PdGainProfile::kRealRobot:
+      if (joint == 0) {
+        return JointPdGains{kRealRobotAbadKp, kRealRobotAbadKd};
+      }
+      if (joint == 1) {
+        return JointPdGains{kRealRobotThighKp, kRealRobotThighKd};
+      }
+      return JointPdGains{kRealRobotCalfKp, kRealRobotCalfKd};
+  }
+  return JointPdGains{0.0f, 0.0f};
 }
 
 inline Eigen::Matrix<float, kObsDim, 1> BuildObservationPolicyOrder(
+    const Eigen::Matrix<float, 3, 1>& base_linear_velocity,
+    const Eigen::Matrix<float, 3, 1>& base_angular_velocity,
     const Eigen::Matrix<float, 3, 1>& projected_gravity,
     const Eigen::Matrix<float, 3, 1>& command,
     const Eigen::Matrix<float, kActionDim, 1>& q_policy,
     const Eigen::Matrix<float, kActionDim, 1>& qd_policy,
-    const Eigen::Matrix<float, kActionDim, 1>& last_action) {
+    const Eigen::Matrix<float, kActionDim, 1>& last_action,
+    float base_height) {
   Eigen::Matrix<float, kObsDim, 1> obs;
-  obs.template segment<3>(0) = projected_gravity;
-  obs.template segment<3>(3) =
+  obs.template segment<3>(kBaseLinearVelocityOffset) =
+      base_linear_velocity * kLinVelScale;
+  obs.template segment<3>(kBaseAngularVelocityOffset) =
+      base_angular_velocity * kAngVelScale;
+  obs.template segment<3>(kProjectedGravityOffset) = projected_gravity;
+
+  obs.template segment<3>(kCommandOffset) =
       command.cwiseProduct(Eigen::Matrix<float, 3, 1>(
           kLinVelScale, kLinVelScale, kAngVelScale));
-  obs.template segment<kActionDim>(6) =
+
+  obs.template segment<kActionDim>(kDofPositionOffset) =
       (q_policy - DefaultJointPositionPolicyOrder()) * kDofPosScale;
-  obs.template segment<kActionDim>(18) = qd_policy * kDofVelScale;
-  obs.template segment<kActionDim>(30) = last_action;
+  obs.template segment<kActionDim>(kDofVelocityOffset) =
+      qd_policy * kDofVelScale;
+  obs.template segment<kActionDim>(kLastActionOffset) =
+      ClipPolicyAction(last_action);
+
+  const float flat_ground_height =
+      Clamp(base_height - kHeightReferenceOffset, -1.0f, 1.0f) *
+      kHeightScale;
+  obs.template segment<kHeightObservationDim>(kHeightObservationOffset)
+      .setConstant(flat_ground_height);
+
+  for (int i = 0; i < kObsDim; ++i) {
+    obs[i] = Clamp(obs[i], -kClipObservations, kClipObservations);
+  }
   return obs;
 }
 

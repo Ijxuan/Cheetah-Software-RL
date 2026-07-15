@@ -30,10 +30,13 @@ file(GLOB_RECURSE sources
 "Controllers/convexMPC/*.cpp")
 list(REMOVE_ITEM sources
   "${CMAKE_CURRENT_SOURCE_DIR}/tools/rapid_rl_policy_benchmark.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/tools/rapid_rl_policy_config_test.cpp"
   "./tools/rapid_rl_policy_benchmark.cpp"
-  "tools/rapid_rl_policy_benchmark.cpp")
+  "./tools/rapid_rl_policy_config_test.cpp"
+  "tools/rapid_rl_policy_benchmark.cpp"
+  "tools/rapid_rl_policy_config_test.cpp")
 foreach(MIT_CTRL_SOURCE ${sources})
-  if(MIT_CTRL_SOURCE MATCHES "rapid_rl_policy_benchmark\\.cpp$")
+  if(MIT_CTRL_SOURCE MATCHES "rapid_rl_policy_(benchmark|config_test)\\.cpp$")
     list(REMOVE_ITEM sources "${MIT_CTRL_SOURCE}")
   endif()
 endforeach()
@@ -58,4 +61,9 @@ if(USE_LIBTORCH_RL)
     FSM_States/RapidRLPolicyRunner.cpp)
   target_compile_definitions(rapid_rl_policy_benchmark PRIVATE USE_LIBTORCH_RL=1)
   target_link_libraries(rapid_rl_policy_benchmark ${TORCH_LIBRARIES})
+
+  add_executable(rapid_rl_policy_config_test
+    tools/rapid_rl_policy_config_test.cpp)
+  add_test(NAME legged_gym_rl_policy_config
+    COMMAND rapid_rl_policy_config_test)
 endif()

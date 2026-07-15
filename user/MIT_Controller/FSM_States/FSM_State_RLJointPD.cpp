@@ -1,4 +1,4 @@
-/*====================== Rapid RL Joint PD Bridge ======================*/
+/*=================== legged_gym RL Joint PD Bridge ===================*/
 
 #include "FSM_State_RLJointPD.h"
 
@@ -9,6 +9,7 @@
 #include <Configuration.h>
 #include "RapidRLBuildConfig.h"
 #include "Utilities/utilities.h"
+#include "main_helper.h"
 
 namespace {
 
@@ -18,7 +19,7 @@ constexpr int64_t kStatePublishDtUs =
     static_cast<int64_t>(rapid_rl::kStatePublishDt * 1000000.0f);
 constexpr int64_t kPolicyTimeoutUs = 100000;
 constexpr int64_t kPolicyWarningPeriodUs = 500000;
-constexpr float kMaxTargetDeltaPerPolicyStep = 0.10f;
+constexpr float kMaxTargetDeltaPerPolicyStep = 0.80f;
 constexpr float kMaxTargetCurrentError = 1.20f;
 constexpr float kMinAbad = -1.5f;
 constexpr float kMaxAbad = 1.5f;
@@ -63,7 +64,7 @@ FSM_State_RLJointPD<T>::FSM_State_RLJointPD(
       _stateLCM(getLcmUrl(255)) {
   std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
             << std::endl;
-  std::cout << "Setup rapid-locomotion LibTorch Joint PD" << std::endl;
+  std::cout << "Setup legged_gym LibTorch Joint PD" << std::endl;
   std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
             << std::endl;
 
@@ -72,24 +73,37 @@ FSM_State_RLJointPD<T>::FSM_State_RLJointPD(
       rapid_rl::DefaultJointPositionPolicyOrder());
   _lastTargetQRobot = _defaultQRobot;
 
+  _pdGainProfile = rapid_rl::RuntimePdGainProfile(gMasterConfig.simulated);
+  const auto abad_gains =
+      rapid_rl::JointPdGainsForProfile(_pdGainProfile, 0);
+  const auto thigh_gains =
+      rapid_rl::JointPdGainsForProfile(_pdGainProfile, 1);
+  const auto calf_gains =
+      rapid_rl::JointPdGainsForProfile(_pdGainProfile, 2);
+  std::cout << "[LeggedGymRL] PD gain profile: "
+            << rapid_rl::PdGainProfileName(_pdGainProfile)
+            << ", Kp=[" << abad_gains.kp << ", " << thigh_gains.kp << ", "
+            << calf_gains.kp << "], Kd=[" << abad_gains.kd << ", "
+            << thigh_gains.kd << ", " << calf_gains.kd << "]" << std::endl;
+
   if (rapid_rl::build_config::kDebugLcmState && !_stateLCM.good()) {
-    std::cout << "[RapidRL] WARNING: failed to initialize debug LCM"
+    std::cout << "[LeggedGymRL] WARNING: failed to initialize debug LCM"
               << std::endl;
   }
 
   _libtorchRunner.reset(new rapid_rl::LibtorchPolicyRunner());
   _policyReady = _libtorchRunner->load();
   if (!_policyReady) {
-    std::cout << "[RapidRL] ERROR: failed to load LibTorch policy: "
+    std::cout << "[LeggedGymRL] ERROR: failed to load LibTorch policy: "
               << _libtorchRunner->error() << std::endl;
     return;
   }
-  std::cout << "[RapidRL] Loaded LibTorch policy from "
-            << _libtorchRunner->checkpointDir() << std::endl;
-  std::cout << "[RapidRL] Shapes: latent "
-            << _libtorchRunner->latentShape() << ", action "
+  std::cout << "[LeggedGymRL] Loaded LibTorch policy: "
+            << _libtorchRunner->policyPath() << std::endl;
+  std::cout << "[LeggedGymRL] Shapes: input "
+            << _libtorchRunner->inputShape() << ", action "
             << _libtorchRunner->actionShape() << std::endl;
-  std::cout << "[RapidRL] Torch CPU threads: "
+  std::cout << "[LeggedGymRL] Torch CPU threads: "
             << rapid_rl::build_config::kTorchNumThreads << std::endl;
 }
 
@@ -100,7 +114,7 @@ template <typename T>
 void FSM_State_RLJointPD<T>::onEnter() {
   std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
             << std::endl;
-  std::cout << "Start rapid-locomotion LibTorch Joint PD" << std::endl;
+  std::cout << "Start legged_gym LibTorch Joint PD" << std::endl;
   std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
             << std::endl;
 
@@ -123,12 +137,9 @@ void FSM_State_RLJointPD<T>::onEnter() {
 
   _emergencyStop = false;
   if (!_policyReady) {
-    std::cout << "[RapidRL] LibTorch policy is not ready; refusing RL control"
+    std::cout << "[LeggedGymRL] LibTorch policy is not ready; refusing RL control"
               << std::endl;
     _emergencyStop = true;
-  }
-  if (_libtorchRunner) {
-    _libtorchRunner->resetHistory();
   }
 }
 
@@ -138,7 +149,7 @@ void FSM_State_RLJointPD<T>::run() {
 
   if (isOrientationUnsafe()) {
     if (!_emergencyStop) {
-      std::cout << "[RapidRL] Orientation is unsafe; disabling RL bridge"
+      std::cout << "[LeggedGymRL] Orientation is unsafe; disabling RL bridge"
                 << std::endl;
     }
     _emergencyStop = true;
@@ -209,7 +220,7 @@ FSM_StateName FSM_State_RLJointPD<T>::checkTransition() {
       break;
 
     default:
-      std::cout << "[RapidRL] Bad transition request from " << K_RL_JOINT_PD
+      std::cout << "[LeggedGymRL] Bad transition request from " << K_RL_JOINT_PD
                 << " to " << this->_data->controlParameters->control_mode
                 << std::endl;
   }
@@ -262,10 +273,12 @@ template <typename T>
 void FSM_State_RLJointPD<T>::commandTarget(const Vec12f& target_q_robot) {
   Mat3<float> kp = Mat3<float>::Zero();
   Mat3<float> kd = Mat3<float>::Zero();
-  kp.diagonal().setConstant(rapid_rl::kKp);
-  kd.diagonal().setConstant(rapid_rl::kKd);
-  kp(0, 0) = rapid_rl::kAbadHipKp;
-  kd(0, 0) = rapid_rl::kAbadHipKd;
+  for (int joint = 0; joint < 3; ++joint) {
+    const auto gains =
+        rapid_rl::JointPdGainsForProfile(_pdGainProfile, joint);
+    kp(joint, joint) = gains.kp;
+    kd(joint, joint) = gains.kd;
+  }
 
   this->_data->_legController->setEnabled(true);
 
@@ -286,7 +299,7 @@ void FSM_State_RLJointPD<T>::commandTarget(const Vec12f& target_q_robot) {
 template <typename T>
 bool FSM_State_RLJointPD<T>::runLibtorchPolicy(int64_t now_us) {
   if (!_libtorchRunner || !_libtorchRunner->ready()) {
-    std::cout << "[RapidRL] LibTorch policy is not ready; disabling RL"
+    std::cout << "[LeggedGymRL] LibTorch policy is not ready; disabling RL"
               << std::endl;
     _emergencyStop = true;
     return false;
@@ -294,17 +307,21 @@ bool FSM_State_RLJointPD<T>::runLibtorchPolicy(int64_t now_us) {
 
   const Vec12f q_policy = rapid_rl::RobotToPolicyOrder(readRobotQ());
   const Vec12f qd_policy = rapid_rl::RobotToPolicyOrder(readRobotQd());
+  const Vec3f base_linear_velocity = readBaseLinearVelocity();
+  const Vec3f base_angular_velocity = readBaseAngularVelocity();
   const Vec3f command = readVelocityCommand();
   const Vec3f projected_gravity = readProjectedGravity();
+  const float base_height = readBaseHeight();
 
   Vec12f action_policy;
   Vec12f target_policy;
   float inference_time_ms = 0.0f;
   std::string error;
-  if (!_libtorchRunner->infer(projected_gravity, command, q_policy, qd_policy,
-                              _lastActionPolicy, &action_policy,
-                              &target_policy, &inference_time_ms, &error)) {
-    std::cout << "[RapidRL] LibTorch inference failed: " << error
+  if (!_libtorchRunner->infer(
+          base_linear_velocity, base_angular_velocity, projected_gravity,
+          command, q_policy, qd_policy, _lastActionPolicy, base_height,
+          &action_policy, &target_policy, &inference_time_ms, &error)) {
+    std::cout << "[LeggedGymRL] LibTorch inference failed: " << error
               << std::endl;
     _emergencyStop = true;
     return false;
@@ -313,21 +330,21 @@ bool FSM_State_RLJointPD<T>::runLibtorchPolicy(int64_t now_us) {
   rapid_rl::InferenceTimingSummary timing;
   if (_libtorchRunner->timingSummary(&timing) &&
       (timing.count == 1 || timing.count == 50 || timing.count % 500 == 0)) {
-    std::cout << "[RapidRL] LibTorch timing count=" << timing.count
+    std::cout << "[LeggedGymRL] LibTorch timing count=" << timing.count
               << " min/mean/p95/max=" << timing.min_ms << "/"
               << timing.mean_ms << "/" << timing.p95_ms << "/"
               << timing.max_ms << " ms" << std::endl;
   }
 
   if (shouldHardStopForInference(inference_time_ms)) {
-    std::cout << "[RapidRL] LibTorch inference exceeded hard timeout: "
+    std::cout << "[LeggedGymRL] LibTorch inference exceeded hard timeout: "
               << inference_time_ms << " ms" << std::endl;
     _emergencyStop = true;
     return false;
   }
   if (inference_time_ms > rapid_rl::build_config::kMaxInferenceMs &&
       now_us - _lastPolicyWarningTimeUs > kPolicyWarningPeriodUs) {
-    std::cout << "[RapidRL] WARNING: LibTorch inference took "
+    std::cout << "[LeggedGymRL] WARNING: LibTorch inference took "
               << inference_time_ms << " ms" << std::endl;
     _lastPolicyWarningTimeUs = now_us;
   }
@@ -340,7 +357,8 @@ bool FSM_State_RLJointPD<T>::acceptPolicyOutput(
     const Vec12f& action_policy, const Vec12f& target_policy,
     bool stop_on_reject) {
   auto reject = [&](const std::string& reason) {
-    std::cout << "[RapidRL] Rejecting policy output: " << reason << std::endl;
+    std::cout << "[LeggedGymRL] Rejecting policy output: " << reason
+              << std::endl;
     if (stop_on_reject) {
       _emergencyStop = true;
     }
@@ -405,6 +423,24 @@ typename FSM_State_RLJointPD<T>::Vec12f FSM_State_RLJointPD<T>::readRobotQd()
     }
   }
   return qd;
+}
+
+template <typename T>
+typename FSM_State_RLJointPD<T>::Vec3f
+FSM_State_RLJointPD<T>::readBaseLinearVelocity() const {
+  return this->_data->_stateEstimator->getResult().vBody;
+}
+
+template <typename T>
+typename FSM_State_RLJointPD<T>::Vec3f
+FSM_State_RLJointPD<T>::readBaseAngularVelocity() const {
+  return this->_data->_stateEstimator->getResult().omegaBody;
+}
+
+template <typename T>
+float FSM_State_RLJointPD<T>::readBaseHeight() const {
+  return static_cast<float>(
+      this->_data->_stateEstimator->getResult().position[2]);
 }
 
 template <typename T>

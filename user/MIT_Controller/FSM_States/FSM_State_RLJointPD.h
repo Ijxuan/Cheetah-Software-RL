@@ -11,7 +11,7 @@
 #include "rl_robot_state_lcmt.hpp"
 
 /**
- * LibTorch state for rapid-locomotion policies.
+ * LibTorch state for the legged_gym Mini Cheetah policy.
  *
  * This FSM state remains the only writer to the leg controller, so all final
  * safety checks stay in the C++ control process. LCM is only used for optional
@@ -42,11 +42,15 @@ class FSM_State_RLJointPD : public FSM_State<T> {
                           bool stop_on_reject);
   Vec12f readRobotQ() const;
   Vec12f readRobotQd() const;
+  Vec3f readBaseLinearVelocity() const;
+  Vec3f readBaseAngularVelocity() const;
+  float readBaseHeight() const;
   Vec3f readVelocityCommand() const;
   Vec3f readProjectedGravity() const;
   bool isOrientationUnsafe() const;
 
   lcm::LCM _stateLCM;
+  rapid_rl::PdGainProfile _pdGainProfile = rapid_rl::PdGainProfile::kRealRobot;
   bool _policyReady = false;
   std::unique_ptr<rapid_rl::LibtorchPolicyRunner> _libtorchRunner;
 

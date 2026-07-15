@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.5)
+enable_testing()
 set(CMAKE_DISABLE_IN_SOURCE_BUILD ON)
 set(CMAKE_DISABLE_SOURCE_CHANGES  ON)
 
@@ -185,14 +186,11 @@ get_filename_component(RAPID_RL_CHECKPOINT_DIR
   "${RAPID_RL_CHECKPOINT_DIR}" ABSOLUTE BASE_DIR "${PROJECT_SOURCE_DIR}")
 set(RAPID_RL_CHECKPOINT_DIR "${RAPID_RL_CHECKPOINT_DIR}" CACHE PATH
   "Directory containing rapid RL TorchScript checkpoints" FORCE)
-foreach(RAPID_RL_CHECKPOINT_FILE
-    adaptation_module_latest.jit
-    body_latest.jit)
-  if(NOT EXISTS "${RAPID_RL_CHECKPOINT_DIR}/${RAPID_RL_CHECKPOINT_FILE}")
-    message(FATAL_ERROR
-      "Missing rapid RL checkpoint ${RAPID_RL_CHECKPOINT_DIR}/${RAPID_RL_CHECKPOINT_FILE}")
-  endif()
-endforeach()
+set(RAPID_RL_CHECKPOINT_FILE "legged_gym_policy_latest.jit")
+if(NOT EXISTS "${RAPID_RL_CHECKPOINT_DIR}/${RAPID_RL_CHECKPOINT_FILE}")
+  message(FATAL_ERROR
+    "Missing legged_gym RL checkpoint ${RAPID_RL_CHECKPOINT_DIR}/${RAPID_RL_CHECKPOINT_FILE}")
+endif()
 
 add_definitions(-DUSE_LIBTORCH_RL=1)
 add_definitions(-D_GLIBCXX_USE_CXX11_ABI=${RAPID_RL_LIBTORCH_CXX11_ABI})

@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
-#include <limits>
+#include <cmath>
 #include <sstream>
 #include <sys/stat.h>
 
@@ -13,6 +13,7 @@ namespace rapid_rl {
 namespace {
 
 constexpr size_t kTimingSampleCapacity = 1000;
+constexpr const char* kPolicyFileName = "legged_gym_policy_latest.jit";
 
 std::string joinPath(const std::string& base, const std::string& leaf) {
   if (base.empty()) {
@@ -48,6 +49,14 @@ std::string tensorShapeString(const std::vector<int64_t>& sizes) {
 bool hasExpectedShape(const torch::Tensor& tensor, int64_t cols) {
   return tensor.dim() == 2 && tensor.size(0) == 1 && tensor.size(1) == cols;
 }
+
+bool isFloat32CpuTensor(const torch::Tensor& tensor) {
+  return tensor.scalar_type() == torch::kFloat32 && tensor.device().is_cpu();
+}
+
+bool isFiniteTensor(const torch::Tensor& tensor) {
+  return torch::isfinite(tensor).all().item<bool>();
+}
 #endif
 
 }  // namespace
@@ -56,9 +65,9 @@ bool LibtorchPolicyRunner::load() {
   ready_ = false;
   error_.clear();
   checkpoint_dir_ = build_config::kCheckpointDir;
-  latent_shape_ = "[]";
+  policy_path_.clear();
+  input_shape_ = "[]";
   action_shape_ = "[]";
-  resetHistory();
   resetTiming();
 
 #ifndef USE_LIBTORCH_RL
@@ -66,15 +75,13 @@ bool LibtorchPolicyRunner::load() {
   return false;
 #else
   if (checkpoint_dir_.empty()) {
-    error_ = "rapid RL checkpoint dir is empty";
+    error_ = "RL checkpoint dir is empty";
     return false;
   }
 
-  const std::string adaptation_path =
-      joinPath(checkpoint_dir_, "adaptation_module_latest.jit");
-  const std::string body_path = joinPath(checkpoint_dir_, "body_latest.jit");
-  if (!fileExists(adaptation_path) || !fileExists(body_path)) {
-    error_ = "missing adaptation_module_latest.jit or body_latest.jit under " +
+  policy_path_ = joinPath(checkpoint_dir_, kPolicyFileName);
+  if (!fileExists(policy_path_)) {
+    error_ = "missing " + std::string(kPolicyFileName) + " under " +
              checkpoint_dir_;
     return false;
   }
@@ -86,40 +93,40 @@ bool LibtorchPolicyRunner::load() {
       g_interop_threads_set = true;
     }
 
-    adaptation_ = torch::jit::load(adaptation_path, torch::kCPU);
-    body_ = torch::jit::load(body_path, torch::kCPU);
-    adaptation_.eval();
-    body_.eval();
+    policy_ = torch::jit::load(policy_path_, torch::kCPU);
+    policy_.eval();
 
     torch::InferenceMode inference_mode;
     const auto options =
         torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-    history_tensor_ =
-        torch::from_blob(obs_history_.data(), {1, kObsHistoryDim}, options);
-    actor_input_tensor_ = torch::zeros({1, kActorInputDim}, options);
-    actor_latent_view_ =
-        actor_input_tensor_.narrow(1, kObsDim, kLatentDim);
+    policy_input_tensor_ = torch::zeros({1, kObsDim}, options);
+    if (!hasExpectedShape(policy_input_tensor_, kObsDim) ||
+        !isFloat32CpuTensor(policy_input_tensor_) ||
+        !isFiniteTensor(policy_input_tensor_)) {
+      error_ = "expected a finite CPU float32 policy input with shape [1, 235]";
+      return false;
+    }
 
-    torch::Tensor latent;
     torch::Tensor action;
     const int validation_iters = std::max(1, build_config::kWarmupIters);
     for (int i = 0; i < validation_iters; ++i) {
-      latent = adaptation_.forward({history_tensor_}).toTensor();
-      if (!hasExpectedShape(latent, kLatentDim)) {
-        error_ = "expected latent shape [1, 18], got " +
-                 tensorShapeString(latent.sizes().vec());
-        return false;
-      }
-      actor_latent_view_.copy_(latent);
-      action = body_.forward({actor_input_tensor_}).toTensor();
+      action = policy_.forward({policy_input_tensor_}).toTensor();
       if (!hasExpectedShape(action, kActionDim)) {
         error_ = "expected action shape [1, 12], got " +
                  tensorShapeString(action.sizes().vec());
         return false;
       }
+      if (!isFloat32CpuTensor(action)) {
+        error_ = "expected a CPU float32 action tensor";
+        return false;
+      }
+      if (!isFiniteTensor(action)) {
+        error_ = "policy warmup produced non-finite actions";
+        return false;
+      }
     }
 
-    latent_shape_ = tensorShapeString(latent.sizes().vec());
+    input_shape_ = tensorShapeString(policy_input_tensor_.sizes().vec());
     action_shape_ = tensorShapeString(action.sizes().vec());
   } catch (const c10::Error& e) {
     error_ = e.what();
@@ -132,10 +139,6 @@ bool LibtorchPolicyRunner::load() {
   ready_ = true;
   return true;
 #endif
-}
-
-void LibtorchPolicyRunner::resetHistory() {
-  obs_history_.fill(0.0f);
 }
 
 void LibtorchPolicyRunner::resetTiming() {
@@ -190,11 +193,14 @@ bool LibtorchPolicyRunner::timingSummary(
   return true;
 }
 
-bool LibtorchPolicyRunner::infer(const Vec3f& projected_gravity,
+bool LibtorchPolicyRunner::infer(const Vec3f& base_linear_velocity,
+                                 const Vec3f& base_angular_velocity,
+                                 const Vec3f& projected_gravity,
                                  const Vec3f& command,
                                  const Vec12f& q_policy,
                                  const Vec12f& qd_policy,
                                  const Vec12f& last_action,
+                                 float base_height,
                                  Vec12f* action,
                                  Vec12f* target_q,
                                  float* inference_time_ms,
@@ -217,13 +223,26 @@ bool LibtorchPolicyRunner::infer(const Vec3f& projected_gravity,
     }
     return false;
   }
+  if (!base_linear_velocity.allFinite() ||
+      !base_angular_velocity.allFinite() ||
+      !projected_gravity.allFinite() || !command.allFinite() ||
+      !q_policy.allFinite() || !qd_policy.allFinite() ||
+      !last_action.allFinite() || !std::isfinite(base_height)) {
+    if (error) {
+      *error = "policy input contains non-finite values";
+    }
+    return false;
+  }
 
 #ifndef USE_LIBTORCH_RL
+  (void)base_linear_velocity;
+  (void)base_angular_velocity;
   (void)projected_gravity;
   (void)command;
   (void)q_policy;
   (void)qd_policy;
   (void)last_action;
+  (void)base_height;
   if (error) {
     *error = "mit_ctrl was built without USE_LIBTORCH_RL";
   }
@@ -232,28 +251,20 @@ bool LibtorchPolicyRunner::infer(const Vec3f& projected_gravity,
   try {
     const auto start = std::chrono::steady_clock::now();
     const Eigen::Matrix<float, kObsDim, 1> obs = BuildObservationPolicyOrder(
-        projected_gravity, command, q_policy, qd_policy, last_action);
-
-    std::copy(obs_history_.begin() + kObsDim, obs_history_.end(),
-              obs_history_.begin());
-    std::copy(obs.data(), obs.data() + kObsDim,
-              obs_history_.end() - kObsDim);
-
-    torch::InferenceMode inference_mode;
-    float* actor_input = actor_input_tensor_.data_ptr<float>();
-    std::copy(obs.data(), obs.data() + kObsDim, actor_input);
-
-    torch::Tensor latent = adaptation_.forward({history_tensor_}).toTensor();
-    if (!hasExpectedShape(latent, kLatentDim)) {
+        base_linear_velocity, base_angular_velocity, projected_gravity,
+        command, q_policy, qd_policy, last_action, base_height);
+    if (!obs.allFinite()) {
       if (error) {
-        *error = "expected latent shape [1, 18], got " +
-                 tensorShapeString(latent.sizes().vec());
+        *error = "policy observation contains non-finite values";
       }
       return false;
     }
-    actor_latent_view_.copy_(latent);
 
-    torch::Tensor action_t = body_.forward({actor_input_tensor_}).toTensor();
+    torch::InferenceMode inference_mode;
+    float* policy_input = policy_input_tensor_.data_ptr<float>();
+    std::copy(obs.data(), obs.data() + kObsDim, policy_input);
+
+    torch::Tensor action_t = policy_.forward({policy_input_tensor_}).toTensor();
     if (!hasExpectedShape(action_t, kActionDim)) {
       if (error) {
         *error = "expected action shape [1, 12], got " +
@@ -261,12 +272,25 @@ bool LibtorchPolicyRunner::infer(const Vec3f& projected_gravity,
       }
       return false;
     }
+    if (!isFloat32CpuTensor(action_t)) {
+      if (error) {
+        *error = "expected a CPU float32 action tensor";
+      }
+      return false;
+    }
+    if (!isFiniteTensor(action_t)) {
+      if (error) {
+        *error = "policy produced non-finite actions";
+      }
+      return false;
+    }
 
-    action_t = action_t.to(torch::kCPU).to(torch::kFloat32).contiguous();
+    action_t = action_t.contiguous();
     const float* action_data = action_t.data_ptr<float>();
     for (int i = 0; i < kActionDim; ++i) {
       (*action)[i] = action_data[i];
     }
+    *action = ClipPolicyAction(*action);
     *target_q = ActionToTargetQPolicyOrder(*action);
 
     const auto end = std::chrono::steady_clock::now();
