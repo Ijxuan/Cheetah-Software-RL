@@ -4,6 +4,12 @@ __collection-name__: user-parameters
 Kd_joint          : [1, 0.2, 0.2]
 Kp_joint          : [3, 3, 3]
 
+# RL_JOINT_PD 仿真界面实时调参；顺序为
+# [abad（外展）, hip/thigh（髋/大腿）, knee/calf（膝/小腿）]，四条腿共用。
+# 仅仿真路径会读取这两项，实机仍使用代码中的已验证固定增益。
+rl_kp_joint       : [20, 20, 20]
+rl_kd_joint       : [0.5, 0.5, 0.5]
+
 #Kp_body           : [100, 100, 100]
 #Kd_body           : [10, 10, 10]
 

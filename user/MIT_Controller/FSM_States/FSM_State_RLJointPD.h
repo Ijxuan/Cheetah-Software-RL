@@ -44,7 +44,6 @@ class FSM_State_RLJointPD : public FSM_State<T> {
   Vec12f readRobotQd() const;
   Vec3f readBaseLinearVelocity() const;
   Vec3f readBaseAngularVelocity() const;
-  float readBaseHeight() const;
   Vec3f readVelocityCommand() const;
   Vec3f readProjectedGravity() const;
   bool isOrientationUnsafe() const;

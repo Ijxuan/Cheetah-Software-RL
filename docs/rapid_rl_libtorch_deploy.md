@@ -15,9 +15,12 @@ rl-checkpoints/legged_gym_policy_latest.jit
 After retraining, export the deterministic actor and replace this single `.jit`
 file with the same filename. Training `.pt` files are not used by the robot
 controller. The old `adaptation_module_latest.jit` and `body_latest.jit` files
-may remain in the directory, but `RL_JOINT_PD` does not load them.
+may remain in the directory, but `RL_JOINT_PD` does not load them. The source
+tree now expects the flat-policy 48-D interface below, so the legacy 235-D
+checkpoint must not be used after rebuilding the controller; replace both the
+binary and this checkpoint together.
 
-The policy is a CPU float32 `235 -> 12` actor. The 235 observations are:
+The flat policy is a CPU float32 `48 -> 12` actor. Its observations are:
 
 ```text
 0:3     vBody * 2.0
@@ -27,7 +30,6 @@ The policy is a CPU float32 `235 -> 12` actor. The 235 observations are:
 12:24   q - q_default
 24:36   qd * 0.05
 36:48   previous actor action
-48:235  clip(base_z - 0.5, -1, 1) * 5, repeated 187 times for flat ground
 ```
 
 The complete observation is clipped to `[-100, 100]`. Policy joint order is
@@ -105,7 +107,7 @@ Expected shape output:
 
 ```text
 policy=.../rl-checkpoints/legged_gym_policy_latest.jit
-input_shape=[1, 235] action_shape=[1, 12]
+input_shape=[1, 48] action_shape=[1, 12]
 ```
 
 Target latency:
@@ -115,4 +117,4 @@ p95 < 18 ms
 ```
 
 All policy outputs must remain finite. Controller startup must report the same
-single policy path and `[1,235] -> [1,12]` shapes.
+single policy path and `[1,48] -> [1,12]` shapes.

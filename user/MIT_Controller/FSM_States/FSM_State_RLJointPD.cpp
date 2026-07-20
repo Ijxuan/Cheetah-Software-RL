@@ -13,22 +13,34 @@
 
 namespace {
 
+// 策略以 rapid_rl::kPolicyDt 的周期运行；此处换算为单调时钟的微秒，
+// 避免策略推理受系统时间校正影响。
 constexpr int64_t kPolicyDtUs =
     static_cast<int64_t>(rapid_rl::kPolicyDt * 1000000.0f);
+// 发布只读 RL 调试状态的周期；与策略周期保持一致。
 constexpr int64_t kStatePublishDtUs =
     static_cast<int64_t>(rapid_rl::kStatePublishDt * 1000000.0f);
+// 单次推理超过 100 ms 视为控制失效，立即关闭 RL 输出。
 constexpr int64_t kPolicyTimeoutUs = 100000;
+// 慢推理告警的限频周期，避免控制台被重复日志淹没。
 constexpr int64_t kPolicyWarningPeriodUs = 500000;
+// 相邻两次策略输出对应的关节目标最多变化 0.80 rad，只做限幅而不急停。
 constexpr float kMaxTargetDeltaPerPolicyStep = 0.80f;
+// 新目标与当前实测关节角相差超过 1.20 rad 时拒绝该目标并急停。
 constexpr float kMaxTargetCurrentError = 1.20f;
+// 策略关节顺序中 abad（外展）关节的允许目标角范围，单位 rad。
 constexpr float kMinAbad = -1.5f;
 constexpr float kMaxAbad = 1.5f;
+// 策略关节顺序中 hip/thigh（髋/大腿）关节的允许目标角范围，单位 rad。
 constexpr float kMinHip = -5.0f;
 constexpr float kMaxHip = 5.0f;
+// 策略关节顺序中 knee/calf（膝/小腿）关节的允许目标角范围，单位 rad。
 constexpr float kMinKnee = -3.0f;
 constexpr float kMaxKnee = 3.0f;
+// 机身 roll 或 pitch 超过 30 度即急停；yaw 不参与该安全判断。
 constexpr float kMaxRollPitchRad = 30.0f * static_cast<float>(M_PI) / 180.0f;
 
+// 返回不受系统时间调整影响的单调微秒时间，供策略节拍和超时判断共用。
 int64_t monotonicTimeUs() {
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
@@ -36,10 +48,13 @@ int64_t monotonicTimeUs() {
          static_cast<int64_t>(now.tv_nsec) / 1000LL;
 }
 
+// infer() 返回毫秒；转换为微秒后与硬超时阈值比较。
 bool shouldHardStopForInference(float inference_time_ms) {
   return inference_time_ms * 1000.0f > static_cast<float>(kPolicyTimeoutUs);
 }
 
+// policy_index 的每三个元素是一条腿，故 index % 3 分别对应
+// abad、hip/thigh、knee/calf 三种关节。
 float jointLowerLimit(int policy_index) {
   const int joint = policy_index % 3;
   if (joint == 0) return kMinAbad;
@@ -52,6 +67,13 @@ float jointUpperLimit(int policy_index) {
   if (joint == 0) return kMaxAbad;
   if (joint == 1) return kMaxHip;
   return kMaxKnee;
+}
+
+// 仿真 GUI 的通用参数表不限制数值范围。非法增益不能写到关节 PD，
+// 因此 NaN、Inf 或负值会回退到已验证的 simulator profile 默认值。
+float simulationPdGainOrFallback(double requested_gain, float fallback_gain) {
+  const float gain = static_cast<float>(requested_gain);
+  return std::isfinite(gain) && gain >= 0.0f ? gain : fallback_gain;
 }
 
 }  // namespace
@@ -273,9 +295,21 @@ template <typename T>
 void FSM_State_RLJointPD<T>::commandTarget(const Vec12f& target_q_robot) {
   Mat3<float> kp = Mat3<float>::Zero();
   Mat3<float> kd = Mat3<float>::Zero();
+  // 仅仿真允许 GUI 覆盖 RL 增益；实机始终保留经验证的 real-robot profile，
+  // 避免通用 User Control Parameters 通道意外改变硬件关节增益。
+  const bool use_simulation_gui_gains =
+      _pdGainProfile == rapid_rl::PdGainProfile::kSimulator &&
+      this->_data->userParameters != nullptr;
   for (int joint = 0; joint < 3; ++joint) {
-    const auto gains =
+    auto gains =
         rapid_rl::JointPdGainsForProfile(_pdGainProfile, joint);
+    if (use_simulation_gui_gains) {
+      // 每个低层控制回合重读一次，仿真界面修改后无需等待下一次 20 ms 策略推理。
+      gains.kp = simulationPdGainOrFallback(
+          this->_data->userParameters->rl_kp_joint[joint], gains.kp);
+      gains.kd = simulationPdGainOrFallback(
+          this->_data->userParameters->rl_kd_joint[joint], gains.kd);
+    }
     kp(joint, joint) = gains.kp;
     kd(joint, joint) = gains.kd;
   }
@@ -311,7 +345,6 @@ bool FSM_State_RLJointPD<T>::runLibtorchPolicy(int64_t now_us) {
   const Vec3f base_angular_velocity = readBaseAngularVelocity();
   const Vec3f command = readVelocityCommand();
   const Vec3f projected_gravity = readProjectedGravity();
-  const float base_height = readBaseHeight();
 
   Vec12f action_policy;
   Vec12f target_policy;
@@ -319,7 +352,7 @@ bool FSM_State_RLJointPD<T>::runLibtorchPolicy(int64_t now_us) {
   std::string error;
   if (!_libtorchRunner->infer(
           base_linear_velocity, base_angular_velocity, projected_gravity,
-          command, q_policy, qd_policy, _lastActionPolicy, base_height,
+          command, q_policy, qd_policy, _lastActionPolicy,
           &action_policy, &target_policy, &inference_time_ms, &error)) {
     std::cout << "[LeggedGymRL] LibTorch inference failed: " << error
               << std::endl;
@@ -438,12 +471,6 @@ FSM_State_RLJointPD<T>::readBaseAngularVelocity() const {
 }
 
 template <typename T>
-float FSM_State_RLJointPD<T>::readBaseHeight() const {
-  return static_cast<float>(
-      this->_data->_stateEstimator->getResult().position[2]);
-}
-
-template <typename T>
 typename FSM_State_RLJointPD<T>::Vec3f
 FSM_State_RLJointPD<T>::readVelocityCommand() const {
   Vec3f command;
@@ -457,18 +484,18 @@ FSM_State_RLJointPD<T>::readVelocityCommand() const {
         this->_data->_desiredStateCommand->rcCommand->omega_des[2]);
   } else {
     command[0] =
-        1.6f * this->_data->_desiredStateCommand->gamepadCommand
+        1.0f * this->_data->_desiredStateCommand->gamepadCommand
                    ->leftStickAnalog[1];
     command[1] =
-        -0.6f * this->_data->_desiredStateCommand->gamepadCommand
+        -1.0f * this->_data->_desiredStateCommand->gamepadCommand
                     ->leftStickAnalog[0];
     command[2] =
         -1.0f * this->_data->_desiredStateCommand->gamepadCommand
                     ->rightStickAnalog[0];
   }
 
-  command[0] = std::max(-1.6f, std::min(1.6f, command[0]));
-  command[1] = std::max(-0.6f, std::min(0.6f, command[1]));
+  command[0] = std::max(-1.0f, std::min(1.0f, command[0]));
+  command[1] = std::max(-1.0f, std::min(1.0f, command[1]));
   command[2] = std::max(-1.0f, std::min(1.0f, command[2]));
 
   if (command.norm() < 0.05f) {

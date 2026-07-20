@@ -24,11 +24,7 @@ int main() {
   using Vec12f = Eigen::Matrix<float, rapid_rl::kActionDim, 1>;
 
   bool ok = true;
-  ok &= check(rapid_rl::kObsDim == 235, "observation dimension");
-  ok &= check(rapid_rl::kHeightObservationOffset == 48,
-              "height observation offset");
-  ok &= check(rapid_rl::kHeightObservationDim == 187,
-              "height observation dimension");
+  ok &= check(rapid_rl::kObsDim == 48, "flat observation dimension");
 
   Vec12f robot_order;
   for (int i = 0; i < rapid_rl::kActionDim; ++i) {
@@ -69,7 +65,7 @@ int main() {
 
   const auto obs = rapid_rl::BuildObservationPolicyOrder(
       base_linear_velocity, base_angular_velocity, projected_gravity,
-      command, q_policy, qd_policy, last_action, 0.30f);
+      command, q_policy, qd_policy, last_action);
   ok &= check(near(obs[0], 2.0f) && near(obs[1], -4.0f) &&
                   near(obs[2], 100.0f),
               "base linear velocity scale and observation clipping");
@@ -88,11 +84,6 @@ int main() {
               "joint velocity segment");
   ok &= check(near(obs[36], 0.1f) && near(obs[47], 1.2f),
               "last action segment");
-  for (int i = rapid_rl::kHeightObservationOffset;
-       i < rapid_rl::kObsDim; ++i) {
-    ok &= check(near(obs[i], -1.0f), "flat-ground height segment");
-  }
-
   Vec12f unit_action;
   unit_action.setOnes();
   const auto target = rapid_rl::ActionToTargetQPolicyOrder(unit_action);
@@ -136,7 +127,7 @@ int main() {
   if (!ok) {
     return 1;
   }
-  std::cout << "[LeggedGymRLConfigTest] PASS: obs=235 action=12 height=187 "
+  std::cout << "[LeggedGymRLConfigTest] PASS: obs=48 action=12 "
                "pd_profiles=training/simulator/real-robot"
             << std::endl;
   return 0;

@@ -20,6 +20,8 @@ public:
         INIT_PARAMETER(Kd_foot),
         INIT_PARAMETER(Kp_joint),
         INIT_PARAMETER(Kd_joint),
+        INIT_PARAMETER(rl_kp_joint),
+        INIT_PARAMETER(rl_kd_joint),
         //INIT_PARAMETER(Kp_joint_swing),
         //INIT_PARAMETER(Kd_joint_swing),
         INIT_PARAMETER(Q_pos),
@@ -96,6 +98,12 @@ public:
 
   DECLARE_PARAMETER(Vec3<double>, Kp_joint);
   DECLARE_PARAMETER(Vec3<double>, Kd_joint);
+
+  // RL_JOINT_PD 仿真专用增益，顺序为
+  // [abad（外展）, hip/thigh（髋/大腿）, knee/calf（膝/小腿）]。
+  // 四条腿共用这一组三元值；实机仍使用 RapidRLPolicyConfig.h 中的固定安全配置。
+  DECLARE_PARAMETER(Vec3<double>, rl_kp_joint);
+  DECLARE_PARAMETER(Vec3<double>, rl_kd_joint);
 
   DECLARE_PARAMETER(Vec3<double>, Q_pos);
   DECLARE_PARAMETER(Vec3<double>, Q_vel);

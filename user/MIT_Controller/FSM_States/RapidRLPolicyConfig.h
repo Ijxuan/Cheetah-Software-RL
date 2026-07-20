@@ -14,14 +14,13 @@ constexpr int kCommandOffset = 9;
 constexpr int kDofPositionOffset = 12;
 constexpr int kDofVelocityOffset = 24;
 constexpr int kLastActionOffset = 36;
-constexpr int kHeightObservationOffset = 48;
-constexpr int kHeightObservationDim = 187;
-constexpr int kObsDim = kHeightObservationOffset + kHeightObservationDim;
 constexpr int kActionDim = 12;
+constexpr int kObsDim = kLastActionOffset + kActionDim;
 
 constexpr float kPolicyDt = 0.02f;
 constexpr float kStatePublishDt = kPolicyDt;
-constexpr float kActionScale = 0.1f;
+// Must match MiniChFlatCfg.control.action_scale during training.
+constexpr float kActionScale = 0.25f;
 
 // PD gains belong to three different environments and must never be treated as
 // one interchangeable setting.  The training profile is policy metadata only;
@@ -66,12 +65,10 @@ constexpr float kDofPosScale = 1.0f;
 constexpr float kDofVelScale = 0.05f;
 constexpr float kLinVelScale = 2.0f;
 constexpr float kAngVelScale = 0.25f;
-constexpr float kHeightScale = 5.0f;
-constexpr float kHeightReferenceOffset = 0.5f;
 constexpr float kClipObservations = 100.0f;
 constexpr float kClipActions = 100.0f;
 
-static_assert(kObsDim == 235, "legged_gym Mini Cheetah policy expects 235 observations");
+static_assert(kObsDim == 48, "legged_gym Mini Cheetah flat policy expects 48 observations");
 
 inline float Clamp(float value, float lower, float upper) {
   return value < lower ? lower : (value > upper ? upper : value);
@@ -193,8 +190,7 @@ inline Eigen::Matrix<float, kObsDim, 1> BuildObservationPolicyOrder(
     const Eigen::Matrix<float, 3, 1>& command,
     const Eigen::Matrix<float, kActionDim, 1>& q_policy,
     const Eigen::Matrix<float, kActionDim, 1>& qd_policy,
-    const Eigen::Matrix<float, kActionDim, 1>& last_action,
-    float base_height) {
+    const Eigen::Matrix<float, kActionDim, 1>& last_action) {
   Eigen::Matrix<float, kObsDim, 1> obs;
   obs.template segment<3>(kBaseLinearVelocityOffset) =
       base_linear_velocity * kLinVelScale;
@@ -212,12 +208,6 @@ inline Eigen::Matrix<float, kObsDim, 1> BuildObservationPolicyOrder(
       qd_policy * kDofVelScale;
   obs.template segment<kActionDim>(kLastActionOffset) =
       ClipPolicyAction(last_action);
-
-  const float flat_ground_height =
-      Clamp(base_height - kHeightReferenceOffset, -1.0f, 1.0f) *
-      kHeightScale;
-  obs.template segment<kHeightObservationDim>(kHeightObservationOffset)
-      .setConstant(flat_ground_height);
 
   for (int i = 0; i < kObsDim; ++i) {
     obs[i] = Clamp(obs[i], -kClipObservations, kClipObservations);

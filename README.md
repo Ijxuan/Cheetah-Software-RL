@@ -16,21 +16,25 @@
 rl-checkpoints/legged_gym_policy_latest.jit
 ```
 
-当前文件来自训练运行 `rough_minich/Jul14_17-07-42_/model_4001.pt`：
+当前目录中的文件来自训练运行
+`rough_minich/Jul17_23-38-03_hip_sym_zero_default_2048x4000/model_4000.pt`：
 
 ```text
 训练 checkpoint SHA256:
-9d359f46b5a2b95a07ef5f90993c12b37c82a1e87a8b16f2d1168332d14dbfc7
+404a259695c0c6f69f3fcf78d39bd32d1a8d056417fdc958a47be04b708c3148
 
 部署 TorchScript SHA256:
-ac9da57984a0d3bdb35725b38c5d46dc959f85f70c5cce2a9e8c35358f778a65
+65b98c3b00ec595638f10a24d45d392b022c7b7b1e147193cc2b37d5c982f94e
 ```
 
-模型是单个 `235 -> 512 -> 256 -> 128 -> 12` ELU Actor，输入和输出均为
+这是旧的 235 维 rough 策略，仅保留作迁移前记录；它不能与本源码重新构建后的
+48 维平地接口一起运行。正式切换时必须同时替换控制器二进制和同名 TorchScript。
+
+目标平地模型是单个 `48 -> 512 -> 256 -> 128 -> 12` ELU Actor，输入和输出均为
 CPU `float32`：
 
 ```text
-input_shape=[1, 235]
+input_shape=[1, 48]
 action_shape=[1, 12]
 ```
 
@@ -38,12 +42,12 @@ action_shape=[1, 12]
 但 `RL_JOINT_PD` 不再加载它们，也不再维护历史观测或 latent 向量。替换策略时
 必须保持新文件名为 `legged_gym_policy_latest.jit`。
 
-## 235 维输入观测
+## 48 维输入观测
 
-输入张量形状为 `[1,235]`。235维由下列分段顺序拼接：
+输入张量形状为 `[1,48]`。48维由下列分段顺序拼接：
 
 ```text
-3 + 3 + 3 + 3 + 12 + 12 + 12 + 187 = 235
+3 + 3 + 3 + 3 + 12 + 12 + 12 = 48
 ```
 
 | 索引 | 维数 | 含义 | 写入模型前的数值 |
@@ -55,7 +59,6 @@ action_shape=[1, 12]
 | `12:24` | 12 | 当前关节角相对默认站立角的偏差 | `q - q_default` |
 | `24:36` | 12 | 当前关节角速度 | `qd * 0.05` |
 | `36:48` | 12 | 上一次 Actor 输出，用于描述策略自身上一控制步的动作 | `last_action` |
-| `48:235` | 187 | 平地高度观测 | 将 `clip(base_z - 0.5,-1,1) * 5` 重复187次 |
 
 拼接完成后，整个观测向量逐元素裁剪到 `[-100,100]`。Runner 会在裁剪前拒绝
 包含 NaN 或 Inf 的状态输入，并在每次推理后检查输出形状、类型和有限性。
@@ -79,17 +82,10 @@ action_shape=[1, 12]
 
 角度单位为弧度。
 
-### 平地高度观测的限制
+### 不使用地形高度观测
 
-训练环境中的187维高度来自17×11个独立采样点。当前实机首版仅面向平地，
-没有真实地形高度图，因此把同一个平地高度值重复187次。例如机身估计高度
-`base_z=0.30 m` 时，每一个高度输入都是：
-
-```text
-(0.30 - 0.50) * 5 = -1.0
-```
-
-这一近似只适用于平地，不应视为粗糙地形感知。
+平地策略训练与部署均不输入高度图或机身高度派生的占位值。它只适用于平整地面；
+若要部署到粗糙地形，必须重新引入与训练一致的真实地形感知输入并重新训练。
 
 ## 12 维输出与关节控制
 
@@ -179,14 +175,14 @@ ldd Cheetah-Software-RL/build-cpu/user/MIT_Controller/mit_ctrl \
 
 ```text
 [LeggedGymRLBenchmark] policy=.../rl-checkpoints/legged_gym_policy_latest.jit
-[LeggedGymRLBenchmark] input_shape=[1, 235] action_shape=[1, 12]
+[LeggedGymRLBenchmark] input_shape=[1, 48] action_shape=[1, 12]
 ```
 
 验收要求为所有输出有限且 `p95 < 18 ms`。控制器初始化时也应出现：
 
 ```text
 [LeggedGymRL] Loaded LibTorch policy: .../legged_gym_policy_latest.jit
-[LeggedGymRL] Shapes: input [1, 235], action [1, 12]
+[LeggedGymRL] Shapes: input [1, 48], action [1, 12]
 ```
 
 完整的 checkpoint 替换、CPU-only 构建和验证流程见

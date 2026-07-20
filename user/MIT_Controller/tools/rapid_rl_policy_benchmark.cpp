@@ -89,15 +89,15 @@ int main(int argc, char** argv) {
   qd_policy.setZero();
   rapid_rl::LibtorchPolicyRunner::Vec12f last_action;
   last_action.setZero();
-  constexpr float kBaseHeight = 0.30f;
-
   rapid_rl::LibtorchPolicyRunner::Vec12f rejected_action;
   rapid_rl::LibtorchPolicyRunner::Vec12f rejected_target;
   float rejected_time_ms = 0.0f;
   std::string rejected_error;
+  rapid_rl::LibtorchPolicyRunner::Vec3f invalid_command = command;
+  invalid_command[0] = std::numeric_limits<float>::infinity();
   if (runner.infer(base_linear_velocity, base_angular_velocity,
-                   projected_gravity, command, q_policy, qd_policy,
-                   last_action, std::numeric_limits<float>::infinity(),
+                   projected_gravity, invalid_command, q_policy, qd_policy,
+                   last_action,
                    &rejected_action, &rejected_target, &rejected_time_ms,
                    &rejected_error)) {
     std::cerr << "[LeggedGymRLBenchmark] non-finite input was not rejected"
@@ -116,7 +116,7 @@ int main(int argc, char** argv) {
     std::string error;
     if (!runner.infer(base_linear_velocity, base_angular_velocity,
                       projected_gravity, command, q_policy, qd_policy,
-                      last_action, kBaseHeight, &action, &target_q,
+                      last_action, &action, &target_q,
                       &inference_time_ms, &error)) {
       std::cerr << "[LeggedGymRLBenchmark] inference failed: " << error
                 << std::endl;

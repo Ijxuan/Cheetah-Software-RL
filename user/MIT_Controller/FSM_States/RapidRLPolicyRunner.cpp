@@ -103,7 +103,7 @@ bool LibtorchPolicyRunner::load() {
     if (!hasExpectedShape(policy_input_tensor_, kObsDim) ||
         !isFloat32CpuTensor(policy_input_tensor_) ||
         !isFiniteTensor(policy_input_tensor_)) {
-      error_ = "expected a finite CPU float32 policy input with shape [1, 235]";
+      error_ = "expected a finite CPU float32 policy input with shape [1, 48]";
       return false;
     }
 
@@ -200,7 +200,6 @@ bool LibtorchPolicyRunner::infer(const Vec3f& base_linear_velocity,
                                  const Vec12f& q_policy,
                                  const Vec12f& qd_policy,
                                  const Vec12f& last_action,
-                                 float base_height,
                                  Vec12f* action,
                                  Vec12f* target_q,
                                  float* inference_time_ms,
@@ -227,7 +226,7 @@ bool LibtorchPolicyRunner::infer(const Vec3f& base_linear_velocity,
       !base_angular_velocity.allFinite() ||
       !projected_gravity.allFinite() || !command.allFinite() ||
       !q_policy.allFinite() || !qd_policy.allFinite() ||
-      !last_action.allFinite() || !std::isfinite(base_height)) {
+      !last_action.allFinite()) {
     if (error) {
       *error = "policy input contains non-finite values";
     }
@@ -242,7 +241,6 @@ bool LibtorchPolicyRunner::infer(const Vec3f& base_linear_velocity,
   (void)q_policy;
   (void)qd_policy;
   (void)last_action;
-  (void)base_height;
   if (error) {
     *error = "mit_ctrl was built without USE_LIBTORCH_RL";
   }
@@ -252,7 +250,7 @@ bool LibtorchPolicyRunner::infer(const Vec3f& base_linear_velocity,
     const auto start = std::chrono::steady_clock::now();
     const Eigen::Matrix<float, kObsDim, 1> obs = BuildObservationPolicyOrder(
         base_linear_velocity, base_angular_velocity, projected_gravity,
-        command, q_policy, qd_policy, last_action, base_height);
+        command, q_policy, qd_policy, last_action);
     if (!obs.allFinite()) {
       if (error) {
         *error = "policy observation contains non-finite values";

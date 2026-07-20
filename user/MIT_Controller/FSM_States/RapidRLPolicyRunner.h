@@ -34,7 +34,6 @@ class LibtorchPolicyRunner {
              const Vec12f& q_policy,
              const Vec12f& qd_policy,
              const Vec12f& last_action,
-             float base_height,
              Vec12f* action,
              Vec12f* target_q,
              float* inference_time_ms,
