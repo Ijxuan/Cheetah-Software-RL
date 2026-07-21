@@ -2,6 +2,7 @@ Reference/
 build/
 build-libtorch/
 build-cpu/
+build-sim-cpu/
 mc-build/
 cmake-build-debug/
 .deps/

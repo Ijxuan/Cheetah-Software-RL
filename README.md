@@ -101,11 +101,13 @@ PD 增益按使用环境严格分开，训练参数不会直接下发到实机�
 | 使用环境 | hip/abad Kp/Kd | thigh Kp/Kd | calf Kp/Kd | 用途 |
 |---|---:|---:|---:|---|
 | Isaac Gym 训练 | `17 / 0.4` | `17 / 0.4` | `34 / 0.8` | 仅记录 Actor 的训练条件 |
-| Cheetah 模拟器（`mit_ctrl m s`） | `20 / 0.5` | `20 / 0.5` | `20 / 0.5` | 独立模拟器配置 |
+| Cheetah 模拟器（`mit_ctrl m s`） | `20 / 0.5` | `20 / 0.5` | `20 / 0.5` | GUI 可实时覆盖的初始值 |
 | Mini Cheetah 实机（`mit_ctrl m r`） | `20 / 0.5` | `20 / 0.5` | `20 / 0.5` | 修改前已验证的实机配置 |
 
-模拟器和实机当前数值相同，但在代码中是两套独立常量；以后调整模拟器
-增益不会连带修改实机值。运行时只会在“模拟器”和“实机”两套配置中选择，
+模拟器和实机当前默认数值相同，但在代码中是两套独立常量；以后调整模拟器
+增益不会连带修改实机值。仿真运行时，GUI 的 User Parameters 表可通过
+`rl_kp_joint` 和 `rl_kd_joint` 覆盖三类关节的值，顺序为
+`[abad, hip/thigh, knee/calf]`，四条腿共用；实机不会读取这两个覆盖项。
 训练增益只作为元数据保留。控制器启动日志会打印实际选择的 profile 和三组
 `Kp/Kd`，实机启动时应明确显示 `real-mini-cheetah` 与
 `Kp=[20, 20, 20]`、`Kd=[0.5, 0.5, 0.5]`。
@@ -149,6 +151,49 @@ cmake -S Cheetah-Software-RL -B Cheetah-Software-RL/build-cpu \
 
 不要直接把另一台电脑上使用 `-march=native` 编译的 `mit_ctrl` 复制到机载电脑；
 应在最终运行策略的机载电脑上重新配置和构建。
+
+## 仿真 GUI 编译（RL 三关节 Kp/Kd 实时调参）
+
+上面的实机 `build-cpu` 命令**没有变化**，并且应继续使用 `-DNO_SIM=ON`。
+若要在仿真 GUI 中实时修改 `rl_kp_joint`、`rl_kd_joint`，需要单独的
+`build-sim-cpu` 构建目录，并显式启用 `-DNO_SIM=OFF`：
+
+```bash
+cd Cheetah-Software-RL
+
+cmake -S . -B build-sim-cpu \
+  -DNO_SIM=OFF \
+  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+  -DLIBTORCH_ROOT=/opt/libtorch-1.10.1-cpu \
+  -DLIBTORCH_CPU_ONLY=ON
+
+cmake --build build-sim-cpu \
+  --target sim mit_ctrl rapid_rl_policy_benchmark rapid_rl_policy_config_test -j
+
+ctest --test-dir build-sim-cpu --output-on-failure
+```
+
+如果该 CPU LibTorch 包需要 MKL，在上述 `cmake` 配置命令中同样追加
+`-DLIBTORCH_MKL_ROOT=/path/to/mkl/lib`。不要复用 `build-cpu`：其 CMake
+缓存中 `NO_SIM=ON`，没有 GUI 的 `sim` 目标。
+
+当前 GUI 按工作目录中的 `../config` 和 `../resources` 查找文件，因此
+`build-sim-cpu` 必须直接位于源码根目录下，并从该目录启动：
+
+```bash
+# 终端 A
+cd Cheetah-Software-RL/build-sim-cpu
+./sim/sim
+
+# 终端 B：也从同一个 build-sim-cpu 目录启动
+cd Cheetah-Software-RL/build-sim-cpu
+./user/MIT_Controller/mit_ctrl m s
+```
+
+在 GUI 中选择 Mini Cheetah / Simulator 并启动后，切到 `RL_JOINT_PD`
+（控制模式 53），即可在 User Parameters 表实时编辑
+`rl_kp_joint=[abad, hip/thigh, knee/calf]` 和 `rl_kd_joint`。这两个参数只在
+`mit_ctrl m s` 的仿真 profile 中生效，`mit_ctrl m r` 的实机增益保持固定。
 
 ## 部署验证
 
