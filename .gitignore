@@ -6,6 +6,7 @@ build-sim-cpu/
 mc-build/
 cmake-build-debug/
 .deps/
+cmake/RapidRLLocalConfig.cmake
 .idea/
 .history/
 lcm-types/cheetahlcm

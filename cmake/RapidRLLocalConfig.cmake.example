@@ -1,0 +1,19 @@
+# Optional per-machine overrides for the Rapid RL CMake build.
+#
+# Copy this file to cmake/RapidRLLocalConfig.cmake and edit it only when the
+# automatic source-relative search cannot find your dependency.  The real file
+# is ignored by Git.  Do not set LIBTORCH_ROOT directly here: these names let a
+# valid -DLIBTORCH_ROOT command-line value remain the highest-priority choice.
+
+# Recommended repository-local layout; independent of the parent directory name:
+# get_filename_component(_rapid_rl_source_root "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+# set(RAPID_RL_LOCAL_LIBTORCH_ROOT
+#     "${_rapid_rl_source_root}/.deps/libtorch-1.10.1-cpu")
+
+# Set this only when the selected CPU LibTorch package needs external MKL.
+# Activating the relevant Conda environment lets CMake find $CONDA_PREFIX/lib
+# automatically, so an explicit override is normally unnecessary.
+# set(RAPID_RL_LOCAL_MKL_ROOT "/absolute/path/to/conda-or-mkl/lib")
+
+# A nonstandard Qt installation for the optional simulator can be supplied as:
+# set(CMAKE_PREFIX_PATH "/absolute/path/to/Qt/5.x/gcc_64;${CMAKE_PREFIX_PATH}")

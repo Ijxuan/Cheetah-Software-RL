@@ -119,34 +119,43 @@ PD 增益按使用环境严格分开，训练参数不会直接下发到实机�
 ## 实机 CPU-only LibTorch 编译
 
 机载电脑应使用 CPU-only LibTorch。当前部署已验证兼容非 cxx11-abi 的
-LibTorch 1.10.1 CPU 包，即 `_GLIBCXX_USE_CXX11_ABI=0`。以下示例假设包位于：
+LibTorch 1.10.1 CPU 包，即 `_GLIBCXX_USE_CXX11_ABI=0`。推荐把包放在源码根
+目录下的相对位置：
 
 ```text
-/opt/libtorch-1.10.1-cpu
+<源码根>/.deps/libtorch-1.10.1-cpu
 ```
 
-在部署工作区根目录执行：
+CMake 会依次接受有效的显式路径、本地配置、环境变量 `LIBTORCH_ROOT`、源码内
+`.deps` 和源码父目录的 `.deps`；因此仓库或上层工作区改名不会影响编译。旧
+`CMakeCache.txt` 中已经失效的绝对路径也会自动跳过并重新发现。
+
+以下命令假设当前位于源码根目录；首次创建实机构建目录时执行：
 
 ```bash
-cmake -S Cheetah-Software-RL -B Cheetah-Software-RL/build-cpu \
-  -DNO_SIM=ON \
-  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-  -DLIBTORCH_ROOT=/opt/libtorch-1.10.1-cpu \
-  -DLIBTORCH_CPU_ONLY=ON
+mkdir -p build-cpu
+cd build-cpu
 
-cmake --build Cheetah-Software-RL/build-cpu \
+cmake .. -DNO_SIM=ON
+
+cmake --build . \
   --target mit_ctrl rapid_rl_policy_benchmark rapid_rl_policy_config_test -j
 ```
 
-如果链接时报缺少 `mkl_*` 符号，重新配置时增加 MKL 动态库目录：
+之后日常增量编译只需要第二条 `cmake --build . ...`，无需再次书写 LibTorch、
+MKL、CPU-only 或顶层目录路径。
+
+部分 CPU LibTorch 包在最终链接时需要外部 MKL。CMake 会自动尝试有效缓存、
+`LIBTORCH_MKL_ROOT` 环境变量、激活 Conda 环境的 `$CONDA_PREFIX/lib` 和源码
+相对的 `.deps/mkl/lib`。若仍报告 `mkl_*` 符号，复制一次本地配置模板并只填写
+该机器的实际目录：
 
 ```bash
-cmake -S Cheetah-Software-RL -B Cheetah-Software-RL/build-cpu \
-  -DNO_SIM=ON \
-  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-  -DLIBTORCH_ROOT=/opt/libtorch-1.10.1-cpu \
-  -DLIBTORCH_CPU_ONLY=ON \
-  -DLIBTORCH_MKL_ROOT=/path/to/mkl/lib
+cp ../cmake/RapidRLLocalConfig.cmake.example \
+  ../cmake/RapidRLLocalConfig.cmake
+# 编辑 ../cmake/RapidRLLocalConfig.cmake 中的
+# RAPID_RL_LOCAL_MKL_ROOT；非标准 LibTorch 位置则填 RAPID_RL_LOCAL_LIBTORCH_ROOT。
+cmake ..
 ```
 
 不要直接把另一台电脑上使用 `-march=native` 编译的 `mit_ctrl` 复制到机载电脑；
@@ -154,39 +163,34 @@ cmake -S Cheetah-Software-RL -B Cheetah-Software-RL/build-cpu \
 
 ## 仿真 GUI 编译（RL 三关节 Kp/Kd 实时调参）
 
-上面的实机 `build-cpu` 命令**没有变化**，并且应继续使用 `-DNO_SIM=ON`。
-若要在仿真 GUI 中实时修改 `rl_kp_joint`、`rl_kd_joint`，需要单独的
-`build-sim-cpu` 构建目录，并显式启用 `-DNO_SIM=OFF`：
+`build-cpu` 不必重建为另一个目录。若想在它中生成 GUI，只需在该构建目录中
+重新配置一次 `NO_SIM`；LibTorch/MKL 等路径仍由上面的 CMake 配置文件处理：
 
 ```bash
-cd Cheetah-Software-RL
+cd build-cpu
 
-cmake -S . -B build-sim-cpu \
-  -DNO_SIM=OFF \
-  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-  -DLIBTORCH_ROOT=/opt/libtorch-1.10.1-cpu \
-  -DLIBTORCH_CPU_ONLY=ON
+cmake .. -DNO_SIM=OFF
 
-cmake --build build-sim-cpu \
+cmake --build . \
   --target sim mit_ctrl rapid_rl_policy_benchmark rapid_rl_policy_config_test -j
 
-ctest --test-dir build-sim-cpu --output-on-failure
+ctest --output-on-failure
 ```
 
-如果该 CPU LibTorch 包需要 MKL，在上述 `cmake` 配置命令中同样追加
-`-DLIBTORCH_MKL_ROOT=/path/to/mkl/lib`。不要复用 `build-cpu`：其 CMake
-缓存中 `NO_SIM=ON`，没有 GUI 的 `sim` 目标。
+`NO_SIM=OFF` 只增加 Qt GUI 的 `sim` 目标，不改变 `mit_ctrl` 的 CPU-only
+LibTorch 或实机 profile。若以后要恢复无 GUI 的精简构建，在相同目录执行
+`cmake .. -DNO_SIM=ON` 即可。
 
 当前 GUI 按工作目录中的 `../config` 和 `../resources` 查找文件，因此
-`build-sim-cpu` 必须直接位于源码根目录下，并从该目录启动：
+`build` 或 `build-cpu` 必须直接位于源码根目录下，并从该目录启动：
 
 ```bash
 # 终端 A
-cd Cheetah-Software-RL/build-sim-cpu
+cd build-cpu
 ./sim/sim
 
-# 终端 B：也从同一个 build-sim-cpu 目录启动
-cd Cheetah-Software-RL/build-sim-cpu
+# 终端 B：也从同一个 build-cpu 目录启动
+cd build-cpu
 ./user/MIT_Controller/mit_ctrl m s
 ```
 
@@ -197,23 +201,24 @@ cd Cheetah-Software-RL/build-sim-cpu
 
 ## 部署验证
 
-先运行观测、关节映射、默认角、动作缩放和 PD 增益测试：
+以下命令也在当前 `build` 或 `build-cpu` 目录执行。先运行观测、关节映射、
+默认角、动作缩放和 PD 增益测试：
 
 ```bash
-ctest --test-dir Cheetah-Software-RL/build-cpu --output-on-failure
+ctest --output-on-failure
 ```
 
 检查控制器二进制没有 CUDA 依赖或未解析动态库：
 
 ```bash
-ldd Cheetah-Software-RL/build-cpu/user/MIT_Controller/mit_ctrl \
+ldd user/MIT_Controller/mit_ctrl \
   | grep -E "cuda|not found"
 ```
 
 上面的 `ldd` 检查必须没有任何输出。然后在机载电脑上运行1000次推理：
 
 ```bash
-./Cheetah-Software-RL/build-cpu/user/MIT_Controller/rapid_rl_policy_benchmark 1000
+./user/MIT_Controller/rapid_rl_policy_benchmark 1000
 ```
 
 输出应明确包含当前单 Actor 路径和形状：

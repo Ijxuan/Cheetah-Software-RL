@@ -40,74 +40,79 @@ The complete observation is clipped to `[-100, 100]`. Policy joint order is
 The exported actor has been verified with non-cxx11-abi CPU-only LibTorch
 1.10.1 and `_GLIBCXX_USE_CXX11_ABI=0`.
 
-Example user-writable install:
+From the source root, the recommended machine-independent install location is
+`.deps/libtorch-1.10.1-cpu`:
 
 ```bash
-mkdir -p /home/xjtx/rl-deploy/.deps
-curl -L --fail -o /home/xjtx/rl-deploy/.deps/libtorch-shared-with-deps-1.10.1+cpu.zip \
+mkdir -p .deps
+curl -L --fail -o .deps/libtorch-shared-with-deps-1.10.1+cpu.zip \
   https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-1.10.1%2Bcpu.zip
-unzip /home/xjtx/rl-deploy/.deps/libtorch-shared-with-deps-1.10.1+cpu.zip \
-  -d /home/xjtx/rl-deploy/.deps
-mv /home/xjtx/rl-deploy/.deps/libtorch \
-  /home/xjtx/rl-deploy/.deps/libtorch-1.10.1-cpu
+unzip .deps/libtorch-shared-with-deps-1.10.1+cpu.zip -d .deps
+mv .deps/libtorch .deps/libtorch-1.10.1-cpu
 ```
 
 Some LibTorch 1.10.1 CPU packages require MKL shared libraries at link/runtime.
-Pass `LIBTORCH_MKL_ROOT` if CMake or the linker reports missing `mkl_*`
-symbols.
+CMake automatically tries a valid cache, `$LIBTORCH_MKL_ROOT`,
+`$CONDA_PREFIX/lib`, and source-relative `.deps/mkl/lib`. For an unusual location, copy
+`cmake/RapidRLLocalConfig.cmake.example` to `cmake/RapidRLLocalConfig.cmake`
+and set `RAPID_RL_LOCAL_MKL_ROOT` once; the local file is ignored by Git.
 
-## Build
+## Build from `build` or `build-cpu`
+
+The dependency resolver accepts a valid explicit/cache path, then the local
+config, `$LIBTORCH_ROOT`, source-root `.deps`, and parent `.deps`. This makes
+the build independent of the enclosing workspace name and repairs stale cached
+absolute paths automatically.
+
+From the source root, create the initial no-GUI controller build:
 
 ```bash
-cmake -S Cheetah-Software-RL -B Cheetah-Software-RL/build-cpu \
-  -DNO_SIM=ON \
-  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-  -DLIBTORCH_ROOT=/home/xjtx/rl-deploy/.deps/libtorch-1.10.1-cpu \
-  -DLIBTORCH_CPU_ONLY=ON \
-  -DLIBTORCH_MKL_ROOT=/opt/miniconda3/envs/unitree-rl/lib
+mkdir -p build-cpu
+cd build-cpu
 
-cmake --build Cheetah-Software-RL/build-cpu \
+cmake .. -DNO_SIM=ON
+
+cmake --build . \
   --target mit_ctrl rapid_rl_policy_benchmark rapid_rl_policy_config_test -j
 ```
 
-`LIBTORCH_MKL_ROOT` can be omitted when the target system provides a CPU-only
-LibTorch package that does not need separate MKL libraries.
+After the initial configure, the second command is the normal incremental
+build command. No workspace path, `LIBTORCH_ROOT`, MKL path, CPU-only flag, or
+CMake policy flag needs to be repeated.
 
 ## Simulator GUI Build (runtime RL PD tuning)
 
-The CPU-only deployment build above is unchanged: it deliberately uses
-`NO_SIM=ON` and does not create the Qt `sim` target. To adjust
-`rl_kp_joint` and `rl_kd_joint` at runtime in the simulator, configure a
-separate build directory with `NO_SIM=OFF`:
+The same `build-cpu` directory may also generate the Qt `sim` target. To adjust
+`rl_kp_joint` and `rl_kd_joint` at runtime, reconfigure that directory once:
 
 ```bash
-cd Cheetah-Software-RL
+cd build-cpu
 
-cmake -S . -B build-sim-cpu \
-  -DNO_SIM=OFF \
-  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-  -DLIBTORCH_ROOT=/home/xjtx/rl-deploy/.deps/libtorch-1.10.1-cpu \
-  -DLIBTORCH_CPU_ONLY=ON \
-  -DLIBTORCH_MKL_ROOT=/opt/miniconda3/envs/unitree-rl/lib
+cmake .. -DNO_SIM=OFF
 
-cmake --build build-sim-cpu \
+cmake --build . \
   --target sim mit_ctrl rapid_rl_policy_benchmark rapid_rl_policy_config_test -j
 
-ctest --test-dir build-sim-cpu --output-on-failure
+ctest --output-on-failure
 ```
 
-Do not reuse `build-cpu`: its CMake cache has `NO_SIM=ON`, so it has no `sim`
-target. The GUI currently resolves `../config` and `../resources` from its
-working directory, so keep `build-sim-cpu` immediately under the source root
-and start both programs from that directory:
+`NO_SIM=OFF` adds only the GUI target; it does not change the CPU-only LibTorch
+controller or the real-robot PD profile. Reconfigure with `NO_SIM=ON` later if
+the GUI target is no longer wanted. Qt5 Core/Widgets/Gui/Gamepad and OpenGL are
+required for this mode; set `CMAKE_PREFIX_PATH` in the local config only for a
+nonstandard Qt installation.
+
+The GUI resolves `../config` and `../resources` from its working directory, so
+`build` or `build-cpu` must be immediately below the source root. Start both
+programs from that directory:
 
 ```bash
 # Terminal A
-cd Cheetah-Software-RL/build-sim-cpu
+cd build-cpu
 ./sim/sim
 
 # Terminal B, using the same working directory
-cd Cheetah-Software-RL/build-sim-cpu
+cd build-cpu
 ./user/MIT_Controller/mit_ctrl m s
 ```
 
@@ -119,11 +124,11 @@ are ignored by the `mit_ctrl m r` real-robot profile.
 
 ## Verify
 
-Run the focused observation, mapping, default-angle, action-scale, and PD-gain
-test:
+From the current `build` or `build-cpu` directory, run the focused observation,
+mapping, default-angle, action-scale, and PD-gain test:
 
 ```bash
-ctest --test-dir Cheetah-Software-RL/build-cpu --output-on-failure
+ctest --output-on-failure
 ```
 
 The PD test keeps three separately named profiles.  Training gains are policy
@@ -136,7 +141,7 @@ The CPU-only build must not depend on CUDA and must resolve all shared
 libraries:
 
 ```bash
-ldd Cheetah-Software-RL/build-cpu/user/MIT_Controller/mit_ctrl | grep -E "cuda|not found"
+ldd user/MIT_Controller/mit_ctrl | grep -E "cuda|not found"
 ```
 
 The command above must print nothing.
@@ -144,7 +149,7 @@ The command above must print nothing.
 Benchmark the exact checkpoint and LibTorch build:
 
 ```bash
-./Cheetah-Software-RL/build-cpu/user/MIT_Controller/rapid_rl_policy_benchmark 1000
+./user/MIT_Controller/rapid_rl_policy_benchmark 1000
 ```
 
 Expected shape output:

@@ -1,4 +1,11 @@
 cmake_minimum_required(VERSION 3.5)
+project(CheetahSoftwareRL LANGUAGES C CXX)
+# CMake 4 removed compatibility for several bundled third-party projects whose
+# declared policy version is 3.5.  Keep this project-level compatibility knob
+# here so operators do not need to repeat it on every configure command.
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.0")
+  set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+endif()
 enable_testing()
 set(CMAKE_DISABLE_IN_SOURCE_BUILD ON)
 set(CMAKE_DISABLE_SOURCE_CHANGES  ON)
@@ -28,6 +35,11 @@ set(RAPID_RL_WARMUP_ITERS "20" CACHE STRING "Warmup iterations before running th
 set(RAPID_RL_MAX_INFERENCE_MS "20.0" CACHE STRING "Soft warning threshold for one rapid RL inference")
 set(RAPID_RL_TORCH_NUM_THREADS "1" CACHE STRING "Torch intra-op CPU thread count for rapid RL inference")
 option(RAPID_RL_DEBUG_LCM_STATE "Publish read-only rl_robot_state LCM debug state" ON)
+
+# Resolve machine-specific LibTorch/MKL locations before validating them.  The
+# resolver repairs stale CMake cache paths and searches relative to this source
+# tree, so normal commands do not depend on a workspace directory name.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/RapidRLDependencyPaths.cmake")
 
 if(MINI_CHEETAH_BUILD)
   SET (THIS_COM "../" )
@@ -65,8 +77,10 @@ if(NOT USE_LIBTORCH_RL)
   message(FATAL_ERROR "RL_JOINT_PD is LibTorch-only; configure with USE_LIBTORCH_RL=ON")
 endif()
 
+rapid_rl_resolve_dependency_paths()
+
 if(NOT LIBTORCH_ROOT)
-  message(FATAL_ERROR "LIBTORCH_ROOT is required for RL_JOINT_PD deployment")
+  message(FATAL_ERROR "LIBTORCH_ROOT could not be resolved for RL_JOINT_PD deployment")
 endif()
 if(NOT IS_DIRECTORY "${LIBTORCH_ROOT}")
   message(FATAL_ERROR "LIBTORCH_ROOT does not exist: ${LIBTORCH_ROOT}")
