@@ -12,7 +12,6 @@
 #ifdef linux 
 
 #define MAX_STACK_SIZE 16384  // 16KB  of stack
-#define TASK_PRIORITY 49      // linux priority, this is not the nice value
 
 #include <string>
 #include <lcm-cpp.hpp>

@@ -6,6 +6,10 @@
 #include <cmath>
 #include <iostream>
 
+#ifdef linux
+#include <sched.h>
+#endif
+
 #include <Configuration.h>
 #include "RapidRLBuildConfig.h"
 #include "Utilities/utilities.h"
@@ -20,10 +24,16 @@ constexpr int64_t kPolicyDtUs =
 // 发布只读 RL 调试状态的周期；与策略周期保持一致。
 constexpr int64_t kStatePublishDtUs =
     static_cast<int64_t>(rapid_rl::kStatePublishDt * 1000000.0f);
-// 单次推理超过 100 ms 视为控制失效，立即关闭 RL 输出。
-constexpr int64_t kPolicyTimeoutUs = 100000;
+// 异步结果超过该年龄时不再写入关节目标，控制器保持上一帧目标。
+constexpr int64_t kPolicyResultTimeoutUs = static_cast<int64_t>(
+    rapid_rl::build_config::kPolicyResultTimeoutMs * 1000.0f);
+// 连续的策略结果超时次数达到该值时，关节输出失能。
+constexpr int kMaxConsecutivePolicyTimeouts =
+    rapid_rl::build_config::kPolicyMaxConsecutiveTimeouts;
 // 慢推理告警的限频周期，避免控制台被重复日志淹没。
 constexpr int64_t kPolicyWarningPeriodUs = 500000;
+// 正常运行时每秒打印一次端到端时序汇总；超时则立即打印诊断。
+constexpr int64_t kPolicyTimingSummaryPeriodUs = 1000000;
 // 相邻两次策略输出对应的关节目标最多变化 0.80 rad，只做限幅而不急停。
 constexpr float kMaxTargetDeltaPerPolicyStep = 0.80f;
 // 新目标与当前实测关节角相差超过 1.20 rad 时拒绝该目标并急停。
@@ -48,9 +58,17 @@ int64_t monotonicTimeUs() {
          static_cast<int64_t>(now.tv_nsec) / 1000LL;
 }
 
-// infer() 返回毫秒；转换为微秒后与硬超时阈值比较。
-bool shouldHardStopForInference(float inference_time_ms) {
-  return inference_time_ms * 1000.0f > static_cast<float>(kPolicyTimeoutUs);
+int currentCpu() {
+#ifdef linux
+  return sched_getcpu();
+#else
+  return -1;
+#endif
+}
+
+float microsecondsToMilliseconds(int64_t microseconds) {
+  return microseconds > 0 ? static_cast<float>(microseconds) / 1000.0f
+                         : 0.0f;
 }
 
 // policy_index 的每三个元素是一条腿，故 index % 3 分别对应
@@ -113,18 +131,18 @@ FSM_State_RLJointPD<T>::FSM_State_RLJointPD(
               << std::endl;
   }
 
-  _libtorchRunner.reset(new rapid_rl::LibtorchPolicyRunner());
-  _policyReady = _libtorchRunner->load();
+  _asyncPolicyRunner.reset(new rapid_rl::AsyncLibtorchPolicyRunner());
+  _policyReady = _asyncPolicyRunner->start();
   if (!_policyReady) {
     std::cout << "[LeggedGymRL] ERROR: failed to load LibTorch policy: "
-              << _libtorchRunner->error() << std::endl;
+              << _asyncPolicyRunner->error() << std::endl;
     return;
   }
   std::cout << "[LeggedGymRL] Loaded LibTorch policy: "
-            << _libtorchRunner->policyPath() << std::endl;
+            << _asyncPolicyRunner->policyPath() << std::endl;
   std::cout << "[LeggedGymRL] Shapes: input "
-            << _libtorchRunner->inputShape() << ", action "
-            << _libtorchRunner->actionShape() << std::endl;
+            << _asyncPolicyRunner->inputShape() << ", action "
+            << _asyncPolicyRunner->actionShape() << std::endl;
   std::cout << "[LeggedGymRL] Torch CPU threads: "
             << rapid_rl::build_config::kTorchNumThreads << std::endl;
 }
@@ -145,8 +163,17 @@ void FSM_State_RLJointPD<T>::onEnter() {
 
   _stateSequence = 0;
   _lastStatePublishTimeUs = 0;
-  _lastPolicyRunTimeUs = 0;
+  _lastPolicyRequestTimeUs = 0;
   _lastPolicyWarningTimeUs = 0;
+  _lastValidPolicyResultTimeUs = monotonicTimeUs();
+  _lastPolicyTimeoutCheckTimeUs = _lastValidPolicyResultTimeUs;
+  _lastPolicyTimingSummaryTimeUs = _lastValidPolicyResultTimeUs;
+  _lastPolicyResultSequence = 0;
+  _lastReportedOverwrittenRequests = 0;
+  _consecutivePolicyTimeouts = 0;
+  _policyTimingWindow = PolicyTimingWindow{};
+  _lastPolicyTimingSample = PolicyTimingSample{};
+  _policyEpoch = _asyncPolicyRunner ? _asyncPolicyRunner->beginEpoch() : 0;
   _lastActionPolicy.setZero();
   _lastTargetQRobot = readRobotQ();
   if (!_lastTargetQRobot.allFinite() || _lastTargetQRobot.norm() < 1e-4f) {
@@ -188,10 +215,9 @@ void FSM_State_RLJointPD<T>::run() {
     return;
   }
 
-  if (now_us - _lastPolicyRunTimeUs >= kPolicyDtUs) {
-    runLibtorchPolicy(now_us);
-    _lastPolicyRunTimeUs = now_us;
-  }
+  // 轮询不会阻塞控制线程。仅按 50 Hz 策略周期提交新状态快照；已完成的结果会
+  // 在下一次 2 ms 控制周期中被采用。
+  runAsyncPolicy(now_us);
   if (_emergencyStop) {
     this->_data->_legController->setEnabled(false);
     return;
@@ -258,6 +284,9 @@ TransitionData<T> FSM_State_RLJointPD<T>::transition() {
 
 template <typename T>
 void FSM_State_RLJointPD<T>::onExit() {
+  if (_asyncPolicyRunner) {
+    _asyncPolicyRunner->beginEpoch();
+  }
   this->_data->_legController->setEnabled(false);
 }
 
@@ -331,58 +360,214 @@ void FSM_State_RLJointPD<T>::commandTarget(const Vec12f& target_q_robot) {
 }
 
 template <typename T>
-bool FSM_State_RLJointPD<T>::runLibtorchPolicy(int64_t now_us) {
-  if (!_libtorchRunner || !_libtorchRunner->ready()) {
+void FSM_State_RLJointPD<T>::recordPolicyTiming(
+    const rapid_rl::AsyncPolicyResult& result, int64_t now_us) {
+  const float queue_ms = microsecondsToMilliseconds(
+      result.worker_started_timestamp_us - result.request_timestamp_us);
+  const float delivery_ms = microsecondsToMilliseconds(
+      now_us - result.completed_timestamp_us);
+  const float total_ms = microsecondsToMilliseconds(
+      now_us - result.request_timestamp_us);
+
+  _lastPolicyTimingSample.valid = true;
+  _lastPolicyTimingSample.sequence = result.sequence;
+  _lastPolicyTimingSample.queue_ms = queue_ms;
+  _lastPolicyTimingSample.inference_ms = result.inference_time_ms;
+  _lastPolicyTimingSample.delivery_ms = delivery_ms;
+  _lastPolicyTimingSample.total_ms = total_ms;
+  _lastPolicyTimingSample.overwritten_request_count =
+      result.overwritten_request_count;
+  _lastPolicyTimingSample.worker_cpu = result.worker_cpu;
+  _lastPolicyTimingSample.control_cpu = currentCpu();
+
+  ++_policyTimingWindow.count;
+  _policyTimingWindow.queue_sum_ms += queue_ms;
+  _policyTimingWindow.inference_sum_ms += result.inference_time_ms;
+  _policyTimingWindow.delivery_sum_ms += delivery_ms;
+  _policyTimingWindow.total_sum_ms += total_ms;
+  _policyTimingWindow.queue_max_ms =
+      std::max(_policyTimingWindow.queue_max_ms, queue_ms);
+  _policyTimingWindow.inference_max_ms = std::max(
+      _policyTimingWindow.inference_max_ms, result.inference_time_ms);
+  _policyTimingWindow.delivery_max_ms =
+      std::max(_policyTimingWindow.delivery_max_ms, delivery_ms);
+  _policyTimingWindow.total_max_ms =
+      std::max(_policyTimingWindow.total_max_ms, total_ms);
+}
+
+template <typename T>
+void FSM_State_RLJointPD<T>::publishPolicyTimingSummary(int64_t now_us) {
+  if (!rapid_rl::build_config::kDebugPolicyTiming ||
+      now_us - _lastPolicyTimingSummaryTimeUs < kPolicyTimingSummaryPeriodUs ||
+      !_asyncPolicyRunner) {
+    return;
+  }
+
+  rapid_rl::AsyncLibtorchPolicyRunner::Diagnostics diagnostics;
+  if (!_asyncPolicyRunner->diagnostics(&diagnostics)) {
+    return;
+  }
+  const uint64_t overwritten_delta =
+      diagnostics.overwritten_request_count >= _lastReportedOverwrittenRequests
+          ? diagnostics.overwritten_request_count -
+                _lastReportedOverwrittenRequests
+          : 0;
+  std::cout << "[LeggedGymRL] Policy pipeline 1s: samples="
+            << _policyTimingWindow.count
+            << " submit_seq=" << diagnostics.latest_submitted_sequence
+            << " done_seq=" << diagnostics.latest_completed_sequence
+            << " inflight_seq=" << diagnostics.in_flight_sequence
+            << " worker_busy=" << diagnostics.worker_busy
+            << " overwrites=" << diagnostics.overwritten_request_count
+            << " (+" << overwritten_delta << ")";
+  if (_policyTimingWindow.count > 0) {
+    const double count = static_cast<double>(_policyTimingWindow.count);
+    std::cout << " queue(avg/max)=" << _policyTimingWindow.queue_sum_ms / count
+              << "/" << _policyTimingWindow.queue_max_ms
+              << " infer(avg/max)="
+              << _policyTimingWindow.inference_sum_ms / count << "/"
+              << _policyTimingWindow.inference_max_ms
+              << " delivery(avg/max)="
+              << _policyTimingWindow.delivery_sum_ms / count << "/"
+              << _policyTimingWindow.delivery_max_ms
+              << " total(avg/max)="
+              << _policyTimingWindow.total_sum_ms / count << "/"
+              << _policyTimingWindow.total_max_ms
+              << " last_seq=" << _lastPolicyTimingSample.sequence
+              << " worker_cpu=" << _lastPolicyTimingSample.worker_cpu
+              << " control_cpu=" << _lastPolicyTimingSample.control_cpu;
+  } else {
+    std::cout << " worker_cpu=" << diagnostics.worker_cpu
+              << " control_cpu=" << currentCpu();
+  }
+  std::cout << std::endl;
+
+  _lastPolicyTimingSummaryTimeUs = now_us;
+  _lastReportedOverwrittenRequests = diagnostics.overwritten_request_count;
+  _policyTimingWindow = PolicyTimingWindow{};
+}
+
+template <typename T>
+void FSM_State_RLJointPD<T>::publishPolicyTimeoutDiagnostics(int64_t now_us) {
+  if (!rapid_rl::build_config::kDebugPolicyTiming || !_asyncPolicyRunner) {
+    return;
+  }
+
+  rapid_rl::AsyncLibtorchPolicyRunner::Diagnostics diagnostics;
+  if (!_asyncPolicyRunner->diagnostics(&diagnostics)) {
+    return;
+  }
+  std::cout << "[LeggedGymRL] Policy timeout diagnostics: submit_seq="
+            << diagnostics.latest_submitted_sequence
+            << " done_seq=" << diagnostics.latest_completed_sequence
+            << " inflight_seq=" << diagnostics.in_flight_sequence
+            << " worker_busy=" << diagnostics.worker_busy
+            << " overwrites=" << diagnostics.overwritten_request_count
+            << " worker_cpu=" << diagnostics.worker_cpu
+            << " control_cpu=" << currentCpu();
+  if (_lastPolicyTimingSample.valid) {
+    std::cout << " last_seq=" << _lastPolicyTimingSample.sequence
+              << " queue/infer/delivery/total="
+              << _lastPolicyTimingSample.queue_ms << "/"
+              << _lastPolicyTimingSample.inference_ms << "/"
+              << _lastPolicyTimingSample.delivery_ms << "/"
+              << _lastPolicyTimingSample.total_ms << " ms"
+              << " last_worker_cpu=" << _lastPolicyTimingSample.worker_cpu
+              << " last_control_cpu=" << _lastPolicyTimingSample.control_cpu;
+  }
+  std::cout << " result_age="
+            << microsecondsToMilliseconds(
+                   now_us - _lastValidPolicyResultTimeUs)
+            << " ms" << std::endl;
+}
+
+template <typename T>
+bool FSM_State_RLJointPD<T>::runAsyncPolicy(int64_t now_us) {
+  if (!_asyncPolicyRunner || !_asyncPolicyRunner->ready() ||
+      _policyEpoch == 0) {
     std::cout << "[LeggedGymRL] LibTorch policy is not ready; disabling RL"
               << std::endl;
     _emergencyStop = true;
     return false;
   }
 
-  const Vec12f q_policy = rapid_rl::RobotToPolicyOrder(readRobotQ());
-  const Vec12f qd_policy = rapid_rl::RobotToPolicyOrder(readRobotQd());
-  const Vec3f base_linear_velocity = readBaseLinearVelocity();
-  const Vec3f base_angular_velocity = readBaseAngularVelocity();
-  const Vec3f command = readVelocityCommand();
-  const Vec3f projected_gravity = readProjectedGravity();
-
-  Vec12f action_policy;
-  Vec12f target_policy;
-  float inference_time_ms = 0.0f;
-  std::string error;
-  if (!_libtorchRunner->infer(
-          base_linear_velocity, base_angular_velocity, projected_gravity,
-          command, q_policy, qd_policy, _lastActionPolicy,
-          &action_policy, &target_policy, &inference_time_ms, &error)) {
-    std::cout << "[LeggedGymRL] LibTorch inference failed: " << error
-              << std::endl;
-    _emergencyStop = true;
-    return false;
+  if (now_us - _lastPolicyRequestTimeUs >= kPolicyDtUs) {
+    rapid_rl::AsyncPolicyInput input;
+    input.base_linear_velocity = readBaseLinearVelocity();
+    input.base_angular_velocity = readBaseAngularVelocity();
+    input.projected_gravity = readProjectedGravity();
+    input.command = readVelocityCommand();
+    input.q_policy = rapid_rl::RobotToPolicyOrder(readRobotQ());
+    input.qd_policy = rapid_rl::RobotToPolicyOrder(readRobotQd());
+    input.last_action = _lastActionPolicy;
+    input.timestamp_us = now_us;
+    if (!_asyncPolicyRunner->submit(_policyEpoch, input)) {
+      std::cout << "[LeggedGymRL] Failed to submit LibTorch policy request; "
+                   "disabling RL"
+                << std::endl;
+      _emergencyStop = true;
+      return false;
+    }
+    _lastPolicyRequestTimeUs = now_us;
   }
 
-  rapid_rl::InferenceTimingSummary timing;
-  if (_libtorchRunner->timingSummary(&timing) &&
-      (timing.count == 1 || timing.count == 50 || timing.count % 500 == 0)) {
-    std::cout << "[LeggedGymRL] LibTorch timing count=" << timing.count
-              << " min/mean/p95/max=" << timing.min_ms << "/"
-              << timing.mean_ms << "/" << timing.p95_ms << "/"
-              << timing.max_ms << " ms" << std::endl;
+  rapid_rl::AsyncPolicyResult result;
+  if (_asyncPolicyRunner->latestResult(&result) &&
+      result.epoch == _policyEpoch &&
+      result.sequence > _lastPolicyResultSequence) {
+    _lastPolicyResultSequence = result.sequence;
+    if (!result.success) {
+      std::cout << "[LeggedGymRL] LibTorch inference failed: " << result.error
+                << std::endl;
+      _emergencyStop = true;
+      return false;
+    }
+
+    recordPolicyTiming(result, now_us);
+
+    const int64_t result_age_us = now_us - result.request_timestamp_us;
+    if (result_age_us > kPolicyResultTimeoutUs) {
+      std::cout << "[LeggedGymRL] Discarding stale LibTorch result (age "
+                << result_age_us / 1000.0f << " ms); holding previous target"
+                << std::endl;
+    } else {
+      if (result.inference_time_ms > rapid_rl::build_config::kMaxInferenceMs &&
+          now_us - _lastPolicyWarningTimeUs > kPolicyWarningPeriodUs) {
+        std::cout << "[LeggedGymRL] WARNING: LibTorch inference took "
+                  << result.inference_time_ms << " ms" << std::endl;
+        _lastPolicyWarningTimeUs = now_us;
+      }
+      if (!acceptPolicyOutput(result.action, result.target_q, true)) {
+        return false;
+      }
+      _lastValidPolicyResultTimeUs = now_us;
+      _lastPolicyTimeoutCheckTimeUs = now_us;
+      _consecutivePolicyTimeouts = 0;
+    }
   }
 
-  if (shouldHardStopForInference(inference_time_ms)) {
-    std::cout << "[LeggedGymRL] LibTorch inference exceeded hard timeout: "
-              << inference_time_ms << " ms" << std::endl;
-    _emergencyStop = true;
-    return false;
-  }
-  if (inference_time_ms > rapid_rl::build_config::kMaxInferenceMs &&
-      now_us - _lastPolicyWarningTimeUs > kPolicyWarningPeriodUs) {
-    std::cout << "[LeggedGymRL] WARNING: LibTorch inference took "
-              << inference_time_ms << " ms" << std::endl;
-    _lastPolicyWarningTimeUs = now_us;
+  publishPolicyTimingSummary(now_us);
+
+  if (now_us - _lastValidPolicyResultTimeUs >= kPolicyResultTimeoutUs &&
+      now_us - _lastPolicyTimeoutCheckTimeUs >= kPolicyDtUs) {
+    _lastPolicyTimeoutCheckTimeUs = now_us;
+    ++_consecutivePolicyTimeouts;
+    std::cout << "[LeggedGymRL] Policy result timeout "
+              << _consecutivePolicyTimeouts << "/"
+              << kMaxConsecutivePolicyTimeouts
+              << "; holding previous target" << std::endl;
+    publishPolicyTimeoutDiagnostics(now_us);
+    if (_consecutivePolicyTimeouts >= kMaxConsecutivePolicyTimeouts) {
+      std::cout << "[LeggedGymRL] Policy timed out consecutively; "
+                   "entering emergency stop"
+                << std::endl;
+      this->_data->emergencyStopRequested = true;
+      _emergencyStop = true;
+      return false;
+    }
   }
 
-  return acceptPolicyOutput(action_policy, target_policy, true);
+  return true;
 }
 
 template <typename T>

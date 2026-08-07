@@ -122,6 +122,62 @@ the User Parameters table can edit `rl_kp_joint` and `rl_kd_joint` in
 legs, take effect in the simulator on the next low-level control cycle, and
 are ignored by the `mit_ctrl m r` real-robot profile.
 
+## 实体机实时任务布局
+
+`RL_JOINT_PD` 不会在实时控制任务中执行 LibTorch。实体机上，EtherCAT 任务
+绑定到一个逻辑 CPU，并以 `SCHED_FIFO` 优先级 99 运行；2 ms 控制任务绑定到
+另一个逻辑 CPU，并以优先级 80 运行。LibTorch 在 `SCHED_OTHER` 工作线程中
+运行，且不会使用 EtherCAT CPU。控制器只采用已完成且带时间戳的策略结果；
+结果过期时保持上一帧目标，连续三次结果过期后进入 ESTOP。
+
+在为机器人构建前，请选择分属不同物理核的两个逻辑 CPU（不能是 SMT 同胞
+线程）：
+
+```bash
+lscpu -e=CPU,CORE,SOCKET
+```
+
+默认使用 EtherCAT CPU 0 和控制 CPU 1。如果它们在机器人计算机上不属于不同的
+物理核，请按实际 CPU 编号覆盖：
+
+```bash
+cd build-cpu
+cmake .. -DNO_SIM=ON \
+  -DRAPID_RL_ETHERCAT_CPU_CORE=<ecat-cpu> \
+  -DRAPID_RL_CONTROL_CPU_CORE=<control-cpu>
+cmake --build . --target mit_ctrl -j
+```
+
+策略结果超时默认是 20 ms，ESTOP 阈值默认是连续三次超时。它们只能在配置阶段
+通过 `RAPID_RL_POLICY_RESULT_TIMEOUT_MS` 和
+`RAPID_RL_POLICY_MAX_CONSECUTIVE_TIMEOUTS` 修改。若无法绑定任一实时任务，或
+无法设置所需的 FIFO 优先级，硬件进程会在启动时退出。此外，还必须在操作系统中
+把 EtherCAT 网卡 IRQ 绑定到 EtherCAT CPU；仅设置进程亲和性无法迁移网卡中断。
+
+### 异步策略时序诊断
+
+`RAPID_RL_DEBUG_POLICY_TIMING` 默认开启。它不会为每次推理打印日志，而是在
+策略结果超时时立即输出一条诊断，并在正常运行时每秒输出一次汇总。日志字段为：
+
+```text
+queue       请求提交到推理工作线程实际开始执行之间的等待时间
+infer       LibTorch infer() 内部的实际计算时间
+delivery    推理完成到控制线程读取结果之间的等待时间
+total       请求提交到控制线程读取结果的端到端时间
+submit_seq / done_seq / inflight_seq
+            最新提交、完成及正在执行的请求序号
+overwrites  工作线程忙碌时被最新状态快照覆盖的待处理请求数量
+worker_cpu / control_cpu
+            推理工作线程与控制线程记录该样本时所在的逻辑 CPU
+```
+
+实体机完成问题定位后，可在重新配置时关闭该低频日志，避免终端 I/O 参与实时
+运行：
+
+```bash
+cmake .. -DRAPID_RL_DEBUG_POLICY_TIMING=OFF
+```
+
 ## Verify
 
 From the current `build` or `build-cpu` directory, run the focused observation,

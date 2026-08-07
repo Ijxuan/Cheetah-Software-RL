@@ -13,6 +13,15 @@ constexpr float kMaxInferenceMs =
     static_cast<float>(@RAPID_RL_MAX_INFERENCE_MS@);
 constexpr int kTorchNumThreads = @RAPID_RL_TORCH_NUM_THREADS@;
 constexpr bool kDebugLcmState = @RAPID_RL_DEBUG_LCM_STATE_VALUE@;
+constexpr bool kDebugPolicyTiming = @RAPID_RL_DEBUG_POLICY_TIMING_VALUE@;
+constexpr int kEthercatCpuCore = @RAPID_RL_ETHERCAT_CPU_CORE@;
+constexpr int kControlCpuCore = @RAPID_RL_CONTROL_CPU_CORE@;
+constexpr int kEthercatRtPriority = @RAPID_RL_ETHERCAT_RT_PRIORITY@;
+constexpr int kControlRtPriority = @RAPID_RL_CONTROL_RT_PRIORITY@;
+constexpr float kPolicyResultTimeoutMs =
+    static_cast<float>(@RAPID_RL_POLICY_RESULT_TIMEOUT_MS@);
+constexpr int kPolicyMaxConsecutiveTimeouts =
+    @RAPID_RL_POLICY_MAX_CONSECUTIVE_TIMEOUTS@;
 
 }  // namespace build_config
 }  // namespace rapid_rl

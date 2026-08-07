@@ -77,6 +77,7 @@ void ControlFSM<T>::initialize() {
 
   // Initialize FSM mode to normal operation
   operatingMode = FSM_OperatingMode::NORMAL;
+  data.emergencyStopRequested = false;
 }
 
 /**
@@ -196,6 +197,14 @@ void ControlFSM<T>::runFSM() {
  */
 template <typename T>
 FSM_OperatingMode ControlFSM<T>::safetyPreCheck() {
+  if (data.emergencyStopRequested) {
+    if (operatingMode != FSM_OperatingMode::ESTOP) {
+      std::cout << "Emergency stop requested by controller safety monitor"
+                << std::endl;
+    }
+    operatingMode = FSM_OperatingMode::ESTOP;
+  }
+
   // Check for safe orientation if the current state requires it
   if (currentState->checkSafeOrientation && data.controlParameters->control_mode != K_RECOVERY_STAND) {
     if (!safetyChecker->checkSafeOrientation()) {

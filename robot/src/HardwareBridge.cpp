@@ -12,6 +12,7 @@
 #include <cstring>
 #include <thread>
 #include "Configuration.h"
+#include "RapidRLBuildConfig.h"
 
 #include "HardwareBridge.h"
 #include "rt/rt_rc_interface.h"
@@ -100,10 +101,13 @@ void HardwareBridge::prefaultStack() {
  * Configures the scheduler for real time priority
  */
 void HardwareBridge::setupScheduler() {
-  printf("[Init] Setup RT Scheduler...\n");
+  // 不把父线程设为 FIFO。std::thread 会继承调度属性，否则 LCM、IMU 和
+  // LibTorch 线程会意外成为 EtherCAT 的同优先级实时线程。下面仅显式配置
+  // 两个有严格时序要求的周期任务。
+  printf("[Init] 主线程保持 SCHED_OTHER；将显式配置实时任务...\n");
   struct sched_param params;
-  params.sched_priority = TASK_PRIORITY;
-  if (sched_setscheduler(0, SCHED_FIFO, &params) == -1) {
+  params.sched_priority = 0;
+  if (sched_setscheduler(0, SCHED_OTHER, &params) == -1) {
     initError("sched_setscheduler failed.\n", true);
   }
 }
@@ -349,6 +353,9 @@ void MiniCheetahHardwareBridge::run() {
   // EtherCAT task (replace SPI communication loop, 250us period)
   PeriodicMemberFunction<MiniCheetahHardwareBridge> ecatTask(
       &taskManager, .001, "ecat-mini", &MiniCheetahHardwareBridge::runSpi, this);
+  ecatTask.setThreadCpuAffinity(rapid_rl::build_config::kEthercatCpuCore);
+  ecatTask.setThreadRealtimePriority(
+      rapid_rl::build_config::kEthercatRtPriority);
   ecatTask.start();
 
   // microstrain
@@ -356,6 +363,10 @@ void MiniCheetahHardwareBridge::run() {
     _microstrainThread = std::thread(&MiniCheetahHardwareBridge::runMicrostrain, this);
 
   // robot controller start
+  _robotRunner->setThreadCpuAffinity(
+      rapid_rl::build_config::kControlCpuCore);
+  _robotRunner->setThreadRealtimePriority(
+      rapid_rl::build_config::kControlRtPriority);
   _robotRunner->start();
 
   // visualization start
@@ -662,9 +673,16 @@ void Cheetah3HardwareBridge::run() {
   // Ecat Task start
   PeriodicMemberFunction<Cheetah3HardwareBridge> ecatTask(
       &taskManager, .001, "ecat", &Cheetah3HardwareBridge::runEcat, this);
+  ecatTask.setThreadCpuAffinity(rapid_rl::build_config::kEthercatCpuCore);
+  ecatTask.setThreadRealtimePriority(
+      rapid_rl::build_config::kEthercatRtPriority);
   ecatTask.start();
 
   // robot controller start
+  _robotRunner->setThreadCpuAffinity(
+      rapid_rl::build_config::kControlCpuCore);
+  _robotRunner->setThreadRealtimePriority(
+      rapid_rl::build_config::kControlRtPriority);
   _robotRunner->start();
 
   // visualization start

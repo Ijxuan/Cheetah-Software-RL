@@ -23,6 +23,9 @@ struct ControlFSMData {
   RobotControlParameters* controlParameters;
   MIT_UserParameters* userParameters;
   VisualizationData* visualizationData;
+  // 由状态内的安全监视器锁存；ControlFSM 在下一控制周期读取该标志并进入
+  // 既有的 ESTOP 处理路径。
+  bool emergencyStopRequested = false;
 };
 
 template struct ControlFSMData<double>;

@@ -5,10 +5,13 @@
  */
 #ifdef linux
  #include <sys/timerfd.h>
+ #include <pthread.h>
+ #include <sched.h>
 #endif
 
 #include <unistd.h>
 #include <cmath>
+#include <stdexcept>
 
 #include "Utilities/PeriodicTask.h"
 #include "Utilities/Timer.h"
@@ -39,6 +42,47 @@ void PeriodicTask::start() {
   init();
   _running = true;
   _thread = std::thread(&PeriodicTask::loopFunction, this);
+
+#ifdef linux
+  if (_threadCpuCore >= 0) {
+    if (_threadCpuCore >= CPU_SETSIZE) {
+      _running = false;
+      _thread.join();
+      cleanup();
+      throw std::runtime_error("PeriodicTask 指定的 CPU 核超出 CPU_SETSIZE 范围");
+    }
+    cpu_set_t cpu_set;
+    CPU_ZERO(&cpu_set);
+    CPU_SET(_threadCpuCore, &cpu_set);
+    const int result = pthread_setaffinity_np(
+        _thread.native_handle(), sizeof(cpu_set), &cpu_set);
+    if (result != 0) {
+      _running = false;
+      _thread.join();
+      cleanup();
+      throw std::runtime_error("无法将周期任务 " + _name + " 绑定到 CPU " +
+                               std::to_string(_threadCpuCore));
+    }
+  }
+  if (_threadFifoPriority >= 0) {
+    if (_threadFifoPriority < 1 || _threadFifoPriority > 99) {
+      _running = false;
+      _thread.join();
+      cleanup();
+      throw std::runtime_error("PeriodicTask 的 SCHED_FIFO 优先级必须为 1-99");
+    }
+    sched_param params;
+    params.sched_priority = _threadFifoPriority;
+    const int result = pthread_setschedparam(
+        _thread.native_handle(), SCHED_FIFO, &params);
+    if (result != 0) {
+      _running = false;
+      _thread.join();
+      cleanup();
+      throw std::runtime_error("无法为周期任务设置 SCHED_FIFO：" + _name);
+    }
+  }
+#endif
 }
 
 /*!
@@ -55,6 +99,20 @@ void PeriodicTask::stop() {
   _thread.join();
   printf("[PeriodicTask] Done!\n");
   cleanup();
+}
+
+void PeriodicTask::setThreadRealtimePriority(int fifo_priority) {
+  if (_running) {
+    throw std::logic_error("Cannot change periodic task priority after start");
+  }
+  _threadFifoPriority = fifo_priority;
+}
+
+void PeriodicTask::setThreadCpuAffinity(int cpu_core) {
+  if (_running) {
+    throw std::logic_error("Cannot change periodic task affinity after start");
+  }
+  _threadCpuCore = cpu_core;
 }
 
 /*!

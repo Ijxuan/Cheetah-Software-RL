@@ -22,6 +22,9 @@ class PeriodicTask {
                std::string name);
   void start();
   void stop();
+  // 负数表示不修改对应 pthread 属性；这两个函数必须在 start() 前调用。
+  void setThreadRealtimePriority(int fifo_priority);
+  void setThreadCpuAffinity(int cpu_core);
   void printStatus();
   void clearMax();
   bool isSlow();
@@ -61,6 +64,8 @@ class PeriodicTask {
   float _maxRuntime = 0;
   std::string _name;
   std::thread _thread;
+  int _threadFifoPriority = -1;
+  int _threadCpuCore = -1;
 };
 
 /*!

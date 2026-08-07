@@ -35,6 +35,13 @@ set(RAPID_RL_WARMUP_ITERS "20" CACHE STRING "Warmup iterations before running th
 set(RAPID_RL_MAX_INFERENCE_MS "20.0" CACHE STRING "Soft warning threshold for one rapid RL inference")
 set(RAPID_RL_TORCH_NUM_THREADS "1" CACHE STRING "Torch intra-op CPU thread count for rapid RL inference")
 option(RAPID_RL_DEBUG_LCM_STATE "Publish read-only rl_robot_state LCM debug state" ON)
+option(RAPID_RL_DEBUG_POLICY_TIMING "输出异步策略端到端延迟的低频诊断日志" ON)
+set(RAPID_RL_ETHERCAT_CPU_CORE "0" CACHE STRING "EtherCAT 任务独占的逻辑 CPU")
+set(RAPID_RL_CONTROL_CPU_CORE "1" CACHE STRING "实时机器人控制任务使用的逻辑 CPU")
+set(RAPID_RL_ETHERCAT_RT_PRIORITY "99" CACHE STRING "EtherCAT 的 SCHED_FIFO 优先级（1-99）")
+set(RAPID_RL_CONTROL_RT_PRIORITY "80" CACHE STRING "机器人控制任务的 SCHED_FIFO 优先级（1-99）")
+set(RAPID_RL_POLICY_RESULT_TIMEOUT_MS "20.0" CACHE STRING "保持上一帧目标前允许的策略结果最大年龄")
+set(RAPID_RL_POLICY_MAX_CONSECUTIVE_TIMEOUTS "3" CACHE STRING "触发 RL 急停前允许的连续过期策略结果次数")
 
 # Resolve machine-specific LibTorch/MKL locations before validating them.  The
 # resolver repairs stale CMake cache paths and searches relative to this source
@@ -195,6 +202,29 @@ endif()
 if(NOT RAPID_RL_MAX_INFERENCE_MS MATCHES "^[0-9]+(\\.[0-9]+)?$")
   message(FATAL_ERROR "RAPID_RL_MAX_INFERENCE_MS must be a non-negative number")
 endif()
+if(NOT RAPID_RL_ETHERCAT_CPU_CORE MATCHES "^[0-9]+$" OR
+   NOT RAPID_RL_CONTROL_CPU_CORE MATCHES "^[0-9]+$")
+  message(FATAL_ERROR "RAPID_RL_ETHERCAT_CPU_CORE 和 RAPID_RL_CONTROL_CPU_CORE 必须为非负整数")
+endif()
+if(RAPID_RL_ETHERCAT_CPU_CORE STREQUAL RAPID_RL_CONTROL_CPU_CORE)
+  message(FATAL_ERROR "EtherCAT 和机器人控制任务必须使用不同的 CPU 核")
+endif()
+if(NOT RAPID_RL_ETHERCAT_RT_PRIORITY MATCHES "^[1-9][0-9]*$" OR
+   NOT RAPID_RL_CONTROL_RT_PRIORITY MATCHES "^[1-9][0-9]*$")
+  message(FATAL_ERROR "RAPID_RL_*_RT_PRIORITY 必须是 1 到 99 的整数")
+endif()
+if(RAPID_RL_ETHERCAT_RT_PRIORITY GREATER 99 OR
+   RAPID_RL_CONTROL_RT_PRIORITY GREATER 99 OR
+   RAPID_RL_ETHERCAT_RT_PRIORITY LESS_EQUAL RAPID_RL_CONTROL_RT_PRIORITY)
+  message(FATAL_ERROR "EtherCAT 优先级必须在 1 到 99 之间，且严格高于机器人控制优先级")
+endif()
+if(NOT RAPID_RL_POLICY_RESULT_TIMEOUT_MS MATCHES "^[0-9]+(\\.[0-9]+)?$" OR
+   RAPID_RL_POLICY_RESULT_TIMEOUT_MS LESS_EQUAL 0)
+  message(FATAL_ERROR "RAPID_RL_POLICY_RESULT_TIMEOUT_MS 必须为正数")
+endif()
+if(NOT RAPID_RL_POLICY_MAX_CONSECUTIVE_TIMEOUTS MATCHES "^[1-9][0-9]*$")
+  message(FATAL_ERROR "RAPID_RL_POLICY_MAX_CONSECUTIVE_TIMEOUTS 必须为正整数")
+endif()
 
 get_filename_component(RAPID_RL_CHECKPOINT_DIR
   "${RAPID_RL_CHECKPOINT_DIR}" ABSOLUTE BASE_DIR "${PROJECT_SOURCE_DIR}")
@@ -220,6 +250,11 @@ if(RAPID_RL_DEBUG_LCM_STATE)
   set(RAPID_RL_DEBUG_LCM_STATE_VALUE 1)
 else()
   set(RAPID_RL_DEBUG_LCM_STATE_VALUE 0)
+endif()
+if(RAPID_RL_DEBUG_POLICY_TIMING)
+  set(RAPID_RL_DEBUG_POLICY_TIMING_VALUE 1)
+else()
+  set(RAPID_RL_DEBUG_POLICY_TIMING_VALUE 0)
 endif()
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/RapidRLBuildConfig.h.cmake
   ${CMAKE_BINARY_DIR}/RapidRLBuildConfig.h @ONLY)

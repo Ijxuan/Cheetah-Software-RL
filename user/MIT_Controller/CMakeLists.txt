@@ -31,12 +31,15 @@ file(GLOB_RECURSE sources
 list(REMOVE_ITEM sources
   "${CMAKE_CURRENT_SOURCE_DIR}/tools/rapid_rl_policy_benchmark.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/tools/rapid_rl_policy_config_test.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/tools/rapid_rl_async_policy_test.cpp"
   "./tools/rapid_rl_policy_benchmark.cpp"
   "./tools/rapid_rl_policy_config_test.cpp"
+  "./tools/rapid_rl_async_policy_test.cpp"
   "tools/rapid_rl_policy_benchmark.cpp"
-  "tools/rapid_rl_policy_config_test.cpp")
+  "tools/rapid_rl_policy_config_test.cpp"
+  "tools/rapid_rl_async_policy_test.cpp")
 foreach(MIT_CTRL_SOURCE ${sources})
-  if(MIT_CTRL_SOURCE MATCHES "rapid_rl_policy_(benchmark|config_test)\\.cpp$")
+  if(MIT_CTRL_SOURCE MATCHES "rapid_rl_(policy_(benchmark|config_test)|async_policy_test)\\.cpp$")
     list(REMOVE_ITEM sources "${MIT_CTRL_SOURCE}")
   endif()
 endforeach()
@@ -66,4 +69,13 @@ if(USE_LIBTORCH_RL)
     tools/rapid_rl_policy_config_test.cpp)
   add_test(NAME legged_gym_rl_policy_config
     COMMAND rapid_rl_policy_config_test)
+
+  add_executable(rapid_rl_async_policy_test
+    tools/rapid_rl_async_policy_test.cpp
+    FSM_States/RapidRLPolicyRunner.cpp
+    FSM_States/RapidRLAsyncPolicyRunner.cpp)
+  target_compile_definitions(rapid_rl_async_policy_test PRIVATE USE_LIBTORCH_RL=1)
+  target_link_libraries(rapid_rl_async_policy_test ${TORCH_LIBRARIES})
+  add_test(NAME legged_gym_rl_async_policy
+    COMMAND rapid_rl_async_policy_test)
 endif()
