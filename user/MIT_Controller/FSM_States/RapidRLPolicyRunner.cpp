@@ -97,9 +97,11 @@ bool LibtorchPolicyRunner::load() {
     policy_ = torch::jit::load(policy_path_, torch::kCPU);
     policy_.eval();
 
-    torch::InferenceMode inference_mode;
     const auto options =
         torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+    // Keep the reusable input tensor as a normal tensor. Creating it inside
+    // InferenceMode marks it as an inference tensor, which cannot later be
+    // modified by resetObservationHistory() outside that mode.
     policy_input_tensor_ = torch::zeros({1, kObsDim}, options);
     if (!hasExpectedShape(policy_input_tensor_, kObsDim) ||
         !isFloat32CpuTensor(policy_input_tensor_) ||
@@ -108,21 +110,19 @@ bool LibtorchPolicyRunner::load() {
       return false;
     }
 
+    torch::InferenceMode inference_mode;
     torch::Tensor action;
     const int validation_iters = std::max(1, build_config::kWarmupIters);
     for (int i = 0; i < validation_iters; ++i) {
       action = policy_.forward({policy_input_tensor_}).toTensor();
-      if (!hasExpectedShape(action, kActionDim)) {
-        error_ = "expected action shape [1, 12], got " +
-                 tensorShapeString(action.sizes().vec());
-        return false;
-      }
-      if (!isFloat32CpuTensor(action)) {
-        error_ = "expected a CPU float32 action tensor";
-        return false;
-      }
-      if (!isFiniteTensor(action)) {
-        error_ = "policy warmup produced non-finite actions";
+      if (!hasExpectedShape(action, kActionDim) ||
+          !isFloat32CpuTensor(action) || !isFiniteTensor(action)) {
+        error_ = !hasExpectedShape(action, kActionDim)
+                     ? "expected action shape [1, 12], got " +
+                           tensorShapeString(action.sizes().vec())
+                     : !isFloat32CpuTensor(action)
+                           ? "expected a CPU float32 action tensor"
+                           : "policy warmup produced non-finite actions";
         return false;
       }
     }
@@ -146,6 +146,8 @@ void LibtorchPolicyRunner::resetObservationHistory() {
   observation_history_.setZero();
 #ifdef USE_LIBTORCH_RL
   if (policy_input_tensor_.defined()) {
+    // The input tensor is intentionally created outside InferenceMode, so it
+    // remains safe to clear and refill between control cycles.
     policy_input_tensor_.zero_();
   }
 #endif
