@@ -42,7 +42,6 @@ class FSM_State_RLJointPD : public FSM_State<T> {
                           bool stop_on_reject);
   Vec12f readRobotQ() const;
   Vec12f readRobotQd() const;
-  Vec3f readBaseLinearVelocity() const;
   Vec3f readBaseAngularVelocity() const;
   Vec3f readVelocityCommand() const;
   Vec3f readProjectedGravity() const;

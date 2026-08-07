@@ -200,10 +200,10 @@ get_filename_component(RAPID_RL_CHECKPOINT_DIR
   "${RAPID_RL_CHECKPOINT_DIR}" ABSOLUTE BASE_DIR "${PROJECT_SOURCE_DIR}")
 set(RAPID_RL_CHECKPOINT_DIR "${RAPID_RL_CHECKPOINT_DIR}" CACHE PATH
   "Directory containing rapid RL TorchScript checkpoints" FORCE)
-set(RAPID_RL_CHECKPOINT_FILE "legged_gym_policy_latest.jit")
+set(RAPID_RL_CHECKPOINT_FILE "model_1000.jit")
 if(NOT EXISTS "${RAPID_RL_CHECKPOINT_DIR}/${RAPID_RL_CHECKPOINT_FILE}")
   message(FATAL_ERROR
-    "Missing legged_gym RL checkpoint ${RAPID_RL_CHECKPOINT_DIR}/${RAPID_RL_CHECKPOINT_FILE}")
+    "Missing HIMLoco RL checkpoint ${RAPID_RL_CHECKPOINT_DIR}/${RAPID_RL_CHECKPOINT_FILE}")
 endif()
 
 add_definitions(-DUSE_LIBTORCH_RL=1)

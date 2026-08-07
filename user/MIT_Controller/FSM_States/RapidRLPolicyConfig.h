@@ -7,19 +7,23 @@
 
 namespace rapid_rl {
 
-constexpr int kBaseLinearVelocityOffset = 0;
+constexpr int kCommandOffset = 0;
 constexpr int kBaseAngularVelocityOffset = 3;
 constexpr int kProjectedGravityOffset = 6;
-constexpr int kCommandOffset = 9;
-constexpr int kDofPositionOffset = 12;
-constexpr int kDofVelocityOffset = 24;
-constexpr int kLastActionOffset = 36;
+constexpr int kDofPositionOffset = 9;
+constexpr int kDofVelocityOffset = 21;
+constexpr int kLastActionOffset = 33;
 constexpr int kActionDim = 12;
-constexpr int kObsDim = kLastActionOffset + kActionDim;
+constexpr int kOneStepObsDim = kLastActionOffset + kActionDim;
+constexpr int kHistorySteps = 6;
+constexpr int kObsDim = kOneStepObsDim * kHistorySteps;
 
 constexpr float kPolicyDt = 0.02f;
 constexpr float kStatePublishDt = kPolicyDt;
-// Must match MiniChFlatCfg.control.action_scale during training.
+constexpr float kMaxCommandLinearX = 1.0f;
+constexpr float kMaxCommandLinearY = 1.0f;
+constexpr float kMaxCommandYaw = 3.14f;
+// Must match MiniChRoughCfg.control.action_scale during training.
 constexpr float kActionScale = 0.25f;
 
 // PD gains belong to three different environments and must never be treated as
@@ -68,39 +72,43 @@ constexpr float kAngVelScale = 0.25f;
 constexpr float kClipObservations = 100.0f;
 constexpr float kClipActions = 100.0f;
 
-static_assert(kObsDim == 48, "legged_gym Mini Cheetah flat policy expects 48 observations");
+static_assert(kOneStepObsDim == 45,
+              "HIMLoco Mini Cheetah policy expects 45 observations per step");
+static_assert(kObsDim == 270,
+              "HIMLoco Mini Cheetah policy expects six 45-D observation frames");
 
 inline float Clamp(float value, float lower, float upper) {
   return value < lower ? lower : (value > upper ? upper : value);
 }
 
-// Policy order follows the mini_cheetah DOF order observed in Isaac Gym:
-// FL, FR, RL, RR; each leg is hip/abad, thigh, calf.
-// The local controller order is FR, FL, RR, RL.
+// Isaac Gym, the Mini Cheetah URDF, and the local controller all use:
+// FR, FL, RR, RL; each leg is hip/abad, thigh, calf.
+// Keep these identity maps explicit so either side cannot silently reintroduce
+// the obsolete FL/FR/RL/RR permutation.
 inline const std::array<int, kActionDim>& PolicyToRobotMap() {
   static const std::array<int, kActionDim> map = {
-      3, 4, 5,
       0, 1, 2,
-      9, 10, 11,
-      6, 7, 8};
+      3, 4, 5,
+      6, 7, 8,
+      9, 10, 11};
   return map;
 }
 
 inline const std::array<int, kActionDim>& RobotToPolicyMap() {
   static const std::array<int, kActionDim> map = {
-      3, 4, 5,
       0, 1, 2,
-      9, 10, 11,
-      6, 7, 8};
+      3, 4, 5,
+      6, 7, 8,
+      9, 10, 11};
   return map;
 }
 
 inline Eigen::Matrix<float, kActionDim, 1> DefaultJointPositionPolicyOrder() {
   Eigen::Matrix<float, kActionDim, 1> q;
-  q <<  0.1f, -0.8f, 1.62f,
-       -0.1f, -0.8f, 1.62f,
+  q << -0.1f, -0.8f, 1.62f,
         0.1f, -0.8f, 1.62f,
-       -0.1f, -0.8f, 1.62f;
+       -0.1f, -0.8f, 1.62f,
+        0.1f, -0.8f, 1.62f;
   return q;
 }
 
@@ -183,25 +191,21 @@ inline JointPdGains JointPdGainsForProfile(PdGainProfile profile,
   return JointPdGains{0.0f, 0.0f};
 }
 
-inline Eigen::Matrix<float, kObsDim, 1> BuildObservationPolicyOrder(
-    const Eigen::Matrix<float, 3, 1>& base_linear_velocity,
+inline Eigen::Matrix<float, kOneStepObsDim, 1>
+BuildOneStepObservationPolicyOrder(
     const Eigen::Matrix<float, 3, 1>& base_angular_velocity,
     const Eigen::Matrix<float, 3, 1>& projected_gravity,
     const Eigen::Matrix<float, 3, 1>& command,
     const Eigen::Matrix<float, kActionDim, 1>& q_policy,
     const Eigen::Matrix<float, kActionDim, 1>& qd_policy,
     const Eigen::Matrix<float, kActionDim, 1>& last_action) {
-  Eigen::Matrix<float, kObsDim, 1> obs;
-  obs.template segment<3>(kBaseLinearVelocityOffset) =
-      base_linear_velocity * kLinVelScale;
-  obs.template segment<3>(kBaseAngularVelocityOffset) =
-      base_angular_velocity * kAngVelScale;
-  obs.template segment<3>(kProjectedGravityOffset) = projected_gravity;
-
+  Eigen::Matrix<float, kOneStepObsDim, 1> obs;
   obs.template segment<3>(kCommandOffset) =
       command.cwiseProduct(Eigen::Matrix<float, 3, 1>(
           kLinVelScale, kLinVelScale, kAngVelScale));
-
+  obs.template segment<3>(kBaseAngularVelocityOffset) =
+      base_angular_velocity * kAngVelScale;
+  obs.template segment<3>(kProjectedGravityOffset) = projected_gravity;
   obs.template segment<kActionDim>(kDofPositionOffset) =
       (q_policy - DefaultJointPositionPolicyOrder()) * kDofPosScale;
   obs.template segment<kActionDim>(kDofVelocityOffset) =
@@ -209,7 +213,7 @@ inline Eigen::Matrix<float, kObsDim, 1> BuildObservationPolicyOrder(
   obs.template segment<kActionDim>(kLastActionOffset) =
       ClipPolicyAction(last_action);
 
-  for (int i = 0; i < kObsDim; ++i) {
+  for (int i = 0; i < kOneStepObsDim; ++i) {
     obs[i] = Clamp(obs[i], -kClipObservations, kClipObservations);
   }
   return obs;

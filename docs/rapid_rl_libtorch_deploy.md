@@ -6,34 +6,39 @@ policy actions from `rl_policy_cmd`.
 
 ## Checkpoints
 
-Runtime TorchScript checkpoints live in:
+Runtime TorchScript checkpoint:
 
 ```bash
-rl-checkpoints/legged_gym_policy_latest.jit
+rl-checkpoints/model_1000.jit
 ```
 
-After retraining, export the deterministic actor and replace this single `.jit`
-file with the same filename. Training `.pt` files are not used by the robot
-controller. The old `adaptation_module_latest.jit` and `body_latest.jit` files
-may remain in the directory, but `RL_JOINT_PD` does not load them. The source
-tree now expects the flat-policy 48-D interface below, so the legacy 235-D
-checkpoint must not be used after rebuilding the controller; replace both the
-binary and this checkpoint together.
+It is exported from the HIMLoco `model_1000.pt` checkpoint. Training `.pt`
+files are not loaded by the robot controller. The old
+`legged_gym_policy_latest.jit`, `adaptation_module_latest.jit`, and
+`body_latest.jit` files may remain, but `RL_JOINT_PD` does not load them.
 
-The flat policy is a CPU float32 `48 -> 12` actor. Its observations are:
+The HIM TorchScript module has a CPU float32 `[1,270] -> [1,12]` contract. Its
+input is six 45-D frames ordered newest first:
 
 ```text
-0:3     vBody * 2.0
+per frame:
+0:3     command * [2.0, 2.0, 0.25]
 3:6     omegaBody * 0.25
 6:9     projected gravity
-9:12    command * [2.0, 2.0, 0.25]
-12:24   q - q_default
-24:36   qd * 0.05
-36:48   previous actor action
+9:21    q - q_default
+21:33   qd * 0.05
+33:45   previous actor action
+
+history:
+[current, t-1, t-2, t-3, t-4, t-5]
 ```
 
-The complete observation is clipped to `[-100, 100]`. Policy joint order is
-`FL, FR, RL, RR`; controller joint order is `FR, FL, RR, RL`.
+Each frame is clipped to `[-100,100]`. The model contains the HIM estimator,
+which produces estimated velocity and latent features internally, plus the
+actor. Therefore deployment must not prepend measured `vBody` or otherwise
+shift these fields. Policy joint order and controller joint order are both
+`FR, FL, RR, RL`, with no additional leg permutation. Observation history is
+cleared when entering `RL_JOINT_PD`.
 
 ## CPU-only LibTorch
 
@@ -155,8 +160,8 @@ Benchmark the exact checkpoint and LibTorch build:
 Expected shape output:
 
 ```text
-policy=.../rl-checkpoints/legged_gym_policy_latest.jit
-input_shape=[1, 48] action_shape=[1, 12]
+policy=.../rl-checkpoints/model_1000.jit
+input_shape=[1, 270] action_shape=[1, 12]
 ```
 
 Target latency:
@@ -166,4 +171,4 @@ p95 < 18 ms
 ```
 
 All policy outputs must remain finite. Controller startup must report the same
-single policy path and `[1,48] -> [1,12]` shapes.
+policy path and `[1,270] -> [1,12]` shapes.

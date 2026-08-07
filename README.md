@@ -13,63 +13,65 @@
 运行时只加载：
 
 ```text
-rl-checkpoints/legged_gym_policy_latest.jit
+rl-checkpoints/model_1000.jit
 ```
 
-当前目录中的文件来自训练运行
-`rough_minich/Jul17_23-38-03_hip_sym_zero_default_2048x4000/model_4000.pt`：
+该文件来自 HIMLoco 训练运行：
 
 ```text
-训练 checkpoint SHA256:
-404a259695c0c6f69f3fcf78d39bd32d1a8d056417fdc958a47be04b708c3148
-
-部署 TorchScript SHA256:
-65b98c3b00ec595638f10a24d45d392b022c7b7b1e147193cc2b37d5c982f94e
+rough_minich/Aug06_16-16-21_smoke_minich/model_1000.pt
 ```
 
-这是旧的 235 维 rough 策略，仅保留作迁移前记录；它不能与本源码重新构建后的
-48 维平地接口一起运行。正式切换时必须同时替换控制器二进制和同名 TorchScript。
-
-目标平地模型是单个 `48 -> 512 -> 256 -> 128 -> 12` ELU Actor，输入和输出均为
-CPU `float32`：
+导出文件和部署副本的 SHA256 均为：
 
 ```text
-input_shape=[1, 48]
+f54bcdc97d274a26adaa341bd2b9073807d64261f9f85a139c71852228e39b0c
+```
+
+该 TorchScript 包含 HIM 速度估计器和 Actor，不是旧的单 Actor flat policy。输入和
+输出均为 CPU `float32`：
+
+```text
+input_shape=[1, 270]
 action_shape=[1, 12]
 ```
 
-目录中原有的 `adaptation_module_latest.jit` 和 `body_latest.jit` 可以保留，
-但 `RL_JOINT_PD` 不再加载它们，也不再维护历史观测或 latent 向量。替换策略时
-必须保持新文件名为 `legged_gym_policy_latest.jit`。
+目录中原有的 `adaptation_module_latest.jit`、`body_latest.jit` 和
+`legged_gym_policy_latest.jit` 可以保留，但 `RL_JOINT_PD` 不再加载它们。
 
-## 48 维输入观测
+## 270 维 HIM 历史观测
 
-输入张量形状为 `[1,48]`。48维由下列分段顺序拼接：
+策略输入由 6 帧 45 维观测组成：
 
 ```text
-3 + 3 + 3 + 3 + 12 + 12 + 12 = 48
+[当前帧, t-1, t-2, t-3, t-4, t-5]
+6 × 45 = 270
 ```
 
-| 索引 | 维数 | 含义 | 写入模型前的数值 |
-|---|---:|---|---|
-| `0:3` | 3 | 机身坐标系线速度 `vBody`，分别为 x/y/z | `vBody * 2.0` |
-| `3:6` | 3 | 机身坐标系角速度 `omegaBody`，分别为 roll/pitch/yaw 轴 | `omegaBody * 0.25` |
-| `6:9` | 3 | 世界重力方向投影到机身坐标系后的单位向量 | 不缩放，水平静止时约为 `[0,0,-1]` |
-| `9:12` | 3 | 期望前向速度、侧向速度和偏航角速度 `[vx,vy,wz]` | 分别乘以 `[2.0,2.0,0.25]` |
-| `12:24` | 12 | 当前关节角相对默认站立角的偏差 | `q - q_default` |
-| `24:36` | 12 | 当前关节角速度 | `qd * 0.05` |
-| `36:48` | 12 | 上一次 Actor 输出，用于描述策略自身上一控制步的动作 | `last_action` |
+每个 45 维帧严格按照 HIMLoco 训练端的顺序拼接：
 
-拼接完成后，整个观测向量逐元素裁剪到 `[-100,100]`。Runner 会在裁剪前拒绝
-包含 NaN 或 Inf 的状态输入，并在每次推理后检查输出形状、类型和有限性。
+| 帧内索引 | 维数 | 含义 | 写入模型前的数值 |
+|---|---:|---|---|
+| `0:3` | 3 | 期望前向速度、侧向速度和偏航角速度 `[vx,vy,wz]` | 分别乘以 `[2.0,2.0,0.25]` |
+| `3:6` | 3 | 机身坐标系角速度 `omegaBody` | `omegaBody * 0.25` |
+| `6:9` | 3 | 世界重力方向投影到机身坐标系后的单位向量 | 不缩放，水平静止时约为 `[0,0,-1]` |
+| `9:21` | 12 | 当前关节角相对默认站立角的偏差 | `q - q_default` |
+| `21:33` | 12 | 当前关节角速度 | `qd * 0.05` |
+| `33:45` | 12 | 上一次 Actor 输出 | `last_action` |
+
+新策略的 actor 不直接接收机身线速度。TorchScript 内的 HIM estimator 根据 6 帧
+历史观测估计 3 维速度和 16 维 latent，再与当前帧的 45 维观测拼接后送入 actor。
+进入 `RL_JOINT_PD` 时历史缓冲清零；之后每次 50 Hz 推理都把最新帧放在最前并
+将旧帧向后移动。每帧拼接完成后逐元素裁剪到 `[-100,100]`。速度命令范围与
+训练配置一致：`vx/vy∈[-1,1] m/s`、`yaw∈[-3.14,3.14] rad/s`。
 
 ### 坐标系与关节顺序
 
 - `vBody`、`omegaBody` 和投影重力均为机身坐标系数据。
-- 策略中的12个关节按 `FL, FR, RL, RR` 排列。
+- 策略中的12个关节按 `FR, FL, RR, RL` 排列。
 - 每条腿内部按 `hip/abad, thigh, calf` 排列。
-- Cheetah 控制器内部按 `FR, FL, RR, RL` 排列，`RL_JOINT_PD` 会在策略输入、
-  输出边界进行双向映射。
+- Cheetah 控制器内部同样按 `FR, FL, RR, RL` 排列，`RL_JOINT_PD` 不再进行额外
+  腿顺序交换。
 
 策略顺序下的默认关节角为：
 
@@ -84,12 +86,12 @@ action_shape=[1, 12]
 
 ### 不使用地形高度观测
 
-平地策略训练与部署均不输入高度图或机身高度派生的占位值。它只适用于平整地面；
-若要部署到粗糙地形，必须重新引入与训练一致的真实地形感知输入并重新训练。
+HIM actor 的公开输入是 270 维本体历史观测，不输入部署侧高度图。训练时的高度
+观测只用于 privileged critic，不属于导出的 estimator + actor 输入契约。
 
 ## 12 维输出与关节控制
 
-Actor 输出12维动作，顺序同样是 `FL, FR, RL, RR`。动作先按训练配置裁剪到
+Actor 输出12维动作，顺序同样是 `FR, FL, RR, RL`。动作先按训练配置裁剪到
 `[-100,100]`，随后生成关节目标角：
 
 ```text
@@ -221,18 +223,19 @@ ldd user/MIT_Controller/mit_ctrl \
 ./user/MIT_Controller/rapid_rl_policy_benchmark 1000
 ```
 
-输出应明确包含当前单 Actor 路径和形状：
+输出应明确包含当前 HIMLoco 策略路径和形状：
 
 ```text
-[LeggedGymRLBenchmark] policy=.../rl-checkpoints/legged_gym_policy_latest.jit
-[LeggedGymRLBenchmark] input_shape=[1, 48] action_shape=[1, 12]
+[LeggedGymRLBenchmark] policy=.../rl-checkpoints/model_1000.jit
+[LeggedGymRLBenchmark] input_shape=[1, 270] action_shape=[1, 12]
 ```
 
-验收要求为所有输出有限且 `p95 < 18 ms`。控制器初始化时也应出现：
+验收要求为所有输出有限且 `p95 < 18 ms`。本机 100 次验证得到约
+`p95=0.043 ms`。控制器初始化时也应出现：
 
 ```text
-[LeggedGymRL] Loaded LibTorch policy: .../legged_gym_policy_latest.jit
-[LeggedGymRL] Shapes: input [1, 48], action [1, 12]
+[LeggedGymRL] Loaded LibTorch policy: .../model_1000.jit
+[LeggedGymRL] Shapes: input [1, 270], action [1, 12]
 ```
 
 完整的 checkpoint 替换、CPU-only 构建和验证流程见

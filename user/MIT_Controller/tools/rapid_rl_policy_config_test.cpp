@@ -24,7 +24,16 @@ int main() {
   using Vec12f = Eigen::Matrix<float, rapid_rl::kActionDim, 1>;
 
   bool ok = true;
-  ok &= check(rapid_rl::kObsDim == 48, "flat observation dimension");
+  ok &= check(rapid_rl::kOneStepObsDim == 45,
+              "HIMLoco one-step observation dimension");
+  ok &= check(rapid_rl::kHistorySteps == 6,
+              "HIMLoco observation history length");
+  ok &= check(rapid_rl::kObsDim == 270,
+              "HIMLoco policy observation dimension");
+  ok &= check(near(rapid_rl::kMaxCommandLinearX, 1.0f) &&
+                  near(rapid_rl::kMaxCommandLinearY, 1.0f) &&
+                  near(rapid_rl::kMaxCommandYaw, 3.14f),
+              "HIMLoco training command ranges");
 
   Vec12f robot_order;
   for (int i = 0; i < rapid_rl::kActionDim; ++i) {
@@ -32,14 +41,11 @@ int main() {
   }
   const auto policy_order = rapid_rl::RobotToPolicyOrder(robot_order);
   const auto round_trip = rapid_rl::PolicyToRobotOrder(policy_order);
+  ok &= check((policy_order - robot_order).cwiseAbs().maxCoeff() == 0.0f,
+              "FR/FL/RR/RL identity mapping");
   ok &= check((round_trip - robot_order).cwiseAbs().maxCoeff() == 0.0f,
               "joint order round trip");
-  ok &= check(near(policy_order[0], 3.0f) && near(policy_order[3], 0.0f) &&
-                  near(policy_order[6], 9.0f) && near(policy_order[9], 6.0f),
-              "FR/FL/RR/RL to FL/FR/RL/RR mapping");
 
-  Eigen::Matrix<float, 3, 1> base_linear_velocity;
-  base_linear_velocity << 1.0f, -2.0f, 60.0f;
   Eigen::Matrix<float, 3, 1> base_angular_velocity;
   base_angular_velocity << 4.0f, -8.0f, 400.0f;
   Eigen::Matrix<float, 3, 1> projected_gravity;
@@ -48,12 +54,12 @@ int main() {
   command << 2.0f, -2.0f, 2.0f;
   const auto q_default = rapid_rl::DefaultJointPositionPolicyOrder();
   Vec12f expected_q_default;
-  expected_q_default << 0.1f, -0.8f, 1.62f,
-                       -0.1f, -0.8f, 1.62f,
-                        0.1f, -0.8f, 1.62f,
-                       -0.1f, -0.8f, 1.62f;
+  expected_q_default << -0.1f, -0.8f, 1.62f,
+                         0.1f, -0.8f, 1.62f,
+                        -0.1f, -0.8f, 1.62f,
+                         0.1f, -0.8f, 1.62f;
   ok &= check((q_default - expected_q_default).cwiseAbs().maxCoeff() == 0.0f,
-              "exact FL/FR/RL/RR default joint angles");
+              "exact FR/FL/RR/RL default joint angles");
   Vec12f q_policy = q_default;
   Vec12f qd_policy;
   Vec12f last_action;
@@ -63,26 +69,23 @@ int main() {
     last_action[i] = 0.1f * static_cast<float>(i + 1);
   }
 
-  const auto obs = rapid_rl::BuildObservationPolicyOrder(
-      base_linear_velocity, base_angular_velocity, projected_gravity,
-      command, q_policy, qd_policy, last_action);
-  ok &= check(near(obs[0], 2.0f) && near(obs[1], -4.0f) &&
-                  near(obs[2], 100.0f),
-              "base linear velocity scale and observation clipping");
+  const auto obs = rapid_rl::BuildOneStepObservationPolicyOrder(
+      base_angular_velocity, projected_gravity, command, q_policy, qd_policy,
+      last_action);
+  ok &= check(near(obs[0], 4.0f) && near(obs[1], -4.0f) &&
+                  near(obs[2], 0.5f),
+              "command scale and first observation segment");
   ok &= check(near(obs[3], 1.0f) && near(obs[4], -2.0f) &&
                   near(obs[5], 100.0f),
               "base angular velocity scale and observation clipping");
   ok &= check(near(obs[6], 0.1f) && near(obs[7], -0.2f) &&
                   near(obs[8], -1.0f),
               "projected gravity segment");
-  ok &= check(near(obs[9], 4.0f) && near(obs[10], -4.0f) &&
-                  near(obs[11], 0.5f),
-              "command scale without an extra deployment-side clamp");
-  ok &= check(near(obs[12], 0.01f) && near(obs[23], 0.12f),
+  ok &= check(near(obs[9], 0.01f) && near(obs[20], 0.12f),
               "joint position segment");
-  ok &= check(near(obs[24], 0.05f) && near(obs[35], 0.60f),
+  ok &= check(near(obs[21], 0.05f) && near(obs[32], 0.60f),
               "joint velocity segment");
-  ok &= check(near(obs[36], 0.1f) && near(obs[47], 1.2f),
+  ok &= check(near(obs[33], 0.1f) && near(obs[44], 1.2f),
               "last action segment");
   Vec12f unit_action;
   unit_action.setOnes();
@@ -127,7 +130,8 @@ int main() {
   if (!ok) {
     return 1;
   }
-  std::cout << "[LeggedGymRLConfigTest] PASS: obs=48 action=12 "
+  std::cout << "[LeggedGymRLConfigTest] PASS: one_step_obs=45 history=6 "
+               "policy_input=270 action=12 "
                "pd_profiles=training/simulator/real-robot"
             << std::endl;
   return 0;

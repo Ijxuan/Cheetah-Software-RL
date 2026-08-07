@@ -27,8 +27,8 @@ class LibtorchPolicyRunner {
   using Vec12f = Eigen::Matrix<float, kActionDim, 1>;
 
   bool load();
-  bool infer(const Vec3f& base_linear_velocity,
-             const Vec3f& base_angular_velocity,
+  void resetObservationHistory();
+  bool infer(const Vec3f& base_angular_velocity,
              const Vec3f& projected_gravity,
              const Vec3f& command,
              const Vec12f& q_policy,
@@ -62,6 +62,8 @@ class LibtorchPolicyRunner {
   float timing_min_ms_ = 0.0f;
   float timing_max_ms_ = 0.0f;
   std::vector<float> timing_samples_;
+  Eigen::Matrix<float, kObsDim, 1> observation_history_ =
+      Eigen::Matrix<float, kObsDim, 1>::Zero();
 
 #ifdef USE_LIBTORCH_RL
   torch::jit::script::Module policy_;

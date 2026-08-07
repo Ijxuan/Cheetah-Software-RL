@@ -13,7 +13,7 @@ namespace rapid_rl {
 namespace {
 
 constexpr size_t kTimingSampleCapacity = 1000;
-constexpr const char* kPolicyFileName = "legged_gym_policy_latest.jit";
+constexpr const char* kPolicyFileName = "model_1000.jit";
 
 std::string joinPath(const std::string& base, const std::string& leaf) {
   if (base.empty()) {
@@ -69,6 +69,7 @@ bool LibtorchPolicyRunner::load() {
   input_shape_ = "[]";
   action_shape_ = "[]";
   resetTiming();
+  resetObservationHistory();
 
 #ifndef USE_LIBTORCH_RL
   error_ = "mit_ctrl was built without USE_LIBTORCH_RL";
@@ -103,7 +104,7 @@ bool LibtorchPolicyRunner::load() {
     if (!hasExpectedShape(policy_input_tensor_, kObsDim) ||
         !isFloat32CpuTensor(policy_input_tensor_) ||
         !isFiniteTensor(policy_input_tensor_)) {
-      error_ = "expected a finite CPU float32 policy input with shape [1, 48]";
+      error_ = "expected a finite CPU float32 policy input with shape [1, 270]";
       return false;
     }
 
@@ -138,6 +139,15 @@ bool LibtorchPolicyRunner::load() {
 
   ready_ = true;
   return true;
+#endif
+}
+
+void LibtorchPolicyRunner::resetObservationHistory() {
+  observation_history_.setZero();
+#ifdef USE_LIBTORCH_RL
+  if (policy_input_tensor_.defined()) {
+    policy_input_tensor_.zero_();
+  }
 #endif
 }
 
@@ -193,8 +203,7 @@ bool LibtorchPolicyRunner::timingSummary(
   return true;
 }
 
-bool LibtorchPolicyRunner::infer(const Vec3f& base_linear_velocity,
-                                 const Vec3f& base_angular_velocity,
+bool LibtorchPolicyRunner::infer(const Vec3f& base_angular_velocity,
                                  const Vec3f& projected_gravity,
                                  const Vec3f& command,
                                  const Vec12f& q_policy,
@@ -222,8 +231,7 @@ bool LibtorchPolicyRunner::infer(const Vec3f& base_linear_velocity,
     }
     return false;
   }
-  if (!base_linear_velocity.allFinite() ||
-      !base_angular_velocity.allFinite() ||
+  if (!base_angular_velocity.allFinite() ||
       !projected_gravity.allFinite() || !command.allFinite() ||
       !q_policy.allFinite() || !qd_policy.allFinite() ||
       !last_action.allFinite()) {
@@ -234,7 +242,6 @@ bool LibtorchPolicyRunner::infer(const Vec3f& base_linear_velocity,
   }
 
 #ifndef USE_LIBTORCH_RL
-  (void)base_linear_velocity;
   (void)base_angular_velocity;
   (void)projected_gravity;
   (void)command;
@@ -248,19 +255,29 @@ bool LibtorchPolicyRunner::infer(const Vec3f& base_linear_velocity,
 #else
   try {
     const auto start = std::chrono::steady_clock::now();
-    const Eigen::Matrix<float, kObsDim, 1> obs = BuildObservationPolicyOrder(
-        base_linear_velocity, base_angular_velocity, projected_gravity,
-        command, q_policy, qd_policy, last_action);
-    if (!obs.allFinite()) {
+    const Eigen::Matrix<float, kOneStepObsDim, 1> current_obs =
+        BuildOneStepObservationPolicyOrder(
+            base_angular_velocity, projected_gravity, command, q_policy,
+            qd_policy, last_action);
+    if (!current_obs.allFinite()) {
       if (error) {
         *error = "policy observation contains non-finite values";
       }
       return false;
     }
 
+    // Training prepends the newest 45-D frame and shifts older frames right:
+    // [t, t-1, t-2, t-3, t-4, t-5].
+    observation_history_.template tail<kObsDim - kOneStepObsDim>() =
+        observation_history_
+            .template head<kObsDim - kOneStepObsDim>()
+            .eval();
+    observation_history_.template head<kOneStepObsDim>() = current_obs;
+
     torch::InferenceMode inference_mode;
     float* policy_input = policy_input_tensor_.data_ptr<float>();
-    std::copy(obs.data(), obs.data() + kObsDim, policy_input);
+    std::copy(observation_history_.data(),
+              observation_history_.data() + kObsDim, policy_input);
 
     torch::Tensor action_t = policy_.forward({policy_input_tensor_}).toTensor();
     if (!hasExpectedShape(action_t, kActionDim)) {

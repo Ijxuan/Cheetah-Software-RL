@@ -75,8 +75,6 @@ int main(int argc, char** argv) {
             << rapid_rl::build_config::kTorchNumThreads
             << " iterations=" << iterations << std::endl;
 
-  rapid_rl::LibtorchPolicyRunner::Vec3f base_linear_velocity;
-  base_linear_velocity.setZero();
   rapid_rl::LibtorchPolicyRunner::Vec3f base_angular_velocity;
   base_angular_velocity.setZero();
   rapid_rl::LibtorchPolicyRunner::Vec3f projected_gravity;
@@ -95,9 +93,8 @@ int main(int argc, char** argv) {
   std::string rejected_error;
   rapid_rl::LibtorchPolicyRunner::Vec3f invalid_command = command;
   invalid_command[0] = std::numeric_limits<float>::infinity();
-  if (runner.infer(base_linear_velocity, base_angular_velocity,
-                   projected_gravity, invalid_command, q_policy, qd_policy,
-                   last_action,
+  if (runner.infer(base_angular_velocity, projected_gravity, invalid_command,
+                   q_policy, qd_policy, last_action,
                    &rejected_action, &rejected_target, &rejected_time_ms,
                    &rejected_error)) {
     std::cerr << "[LeggedGymRLBenchmark] non-finite input was not rejected"
@@ -114,9 +111,8 @@ int main(int argc, char** argv) {
     rapid_rl::LibtorchPolicyRunner::Vec12f target_q;
     float inference_time_ms = 0.0f;
     std::string error;
-    if (!runner.infer(base_linear_velocity, base_angular_velocity,
-                      projected_gravity, command, q_policy, qd_policy,
-                      last_action, &action, &target_q,
+    if (!runner.infer(base_angular_velocity, projected_gravity, command,
+                      q_policy, qd_policy, last_action, &action, &target_q,
                       &inference_time_ms, &error)) {
       std::cerr << "[LeggedGymRLBenchmark] inference failed: " << error
                 << std::endl;

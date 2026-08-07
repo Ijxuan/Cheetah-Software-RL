@@ -156,6 +156,9 @@ void FSM_State_RLJointPD<T>::onEnter() {
   for (int leg = 0; leg < 4; ++leg) {
     _preCommands[leg].zero();
   }
+  if (_libtorchRunner) {
+    _libtorchRunner->resetObservationHistory();
+  }
 
   _emergencyStop = false;
   if (!_policyReady) {
@@ -341,7 +344,6 @@ bool FSM_State_RLJointPD<T>::runLibtorchPolicy(int64_t now_us) {
 
   const Vec12f q_policy = rapid_rl::RobotToPolicyOrder(readRobotQ());
   const Vec12f qd_policy = rapid_rl::RobotToPolicyOrder(readRobotQd());
-  const Vec3f base_linear_velocity = readBaseLinearVelocity();
   const Vec3f base_angular_velocity = readBaseAngularVelocity();
   const Vec3f command = readVelocityCommand();
   const Vec3f projected_gravity = readProjectedGravity();
@@ -351,9 +353,9 @@ bool FSM_State_RLJointPD<T>::runLibtorchPolicy(int64_t now_us) {
   float inference_time_ms = 0.0f;
   std::string error;
   if (!_libtorchRunner->infer(
-          base_linear_velocity, base_angular_velocity, projected_gravity,
-          command, q_policy, qd_policy, _lastActionPolicy,
-          &action_policy, &target_policy, &inference_time_ms, &error)) {
+          base_angular_velocity, projected_gravity, command, q_policy,
+          qd_policy, _lastActionPolicy, &action_policy, &target_policy,
+          &inference_time_ms, &error)) {
     std::cout << "[LeggedGymRL] LibTorch inference failed: " << error
               << std::endl;
     _emergencyStop = true;
@@ -460,12 +462,6 @@ typename FSM_State_RLJointPD<T>::Vec12f FSM_State_RLJointPD<T>::readRobotQd()
 
 template <typename T>
 typename FSM_State_RLJointPD<T>::Vec3f
-FSM_State_RLJointPD<T>::readBaseLinearVelocity() const {
-  return this->_data->_stateEstimator->getResult().vBody;
-}
-
-template <typename T>
-typename FSM_State_RLJointPD<T>::Vec3f
 FSM_State_RLJointPD<T>::readBaseAngularVelocity() const {
   return this->_data->_stateEstimator->getResult().omegaBody;
 }
@@ -484,19 +480,22 @@ FSM_State_RLJointPD<T>::readVelocityCommand() const {
         this->_data->_desiredStateCommand->rcCommand->omega_des[2]);
   } else {
     command[0] =
-        1.0f * this->_data->_desiredStateCommand->gamepadCommand
-                   ->leftStickAnalog[1];
+        rapid_rl::kMaxCommandLinearX *
+        this->_data->_desiredStateCommand->gamepadCommand->leftStickAnalog[1];
     command[1] =
-        -1.0f * this->_data->_desiredStateCommand->gamepadCommand
-                    ->leftStickAnalog[0];
+        -rapid_rl::kMaxCommandLinearY *
+        this->_data->_desiredStateCommand->gamepadCommand->leftStickAnalog[0];
     command[2] =
-        -1.0f * this->_data->_desiredStateCommand->gamepadCommand
-                    ->rightStickAnalog[0];
+        -rapid_rl::kMaxCommandYaw *
+        this->_data->_desiredStateCommand->gamepadCommand->rightStickAnalog[0];
   }
 
-  command[0] = std::max(-1.0f, std::min(1.0f, command[0]));
-  command[1] = std::max(-1.0f, std::min(1.0f, command[1]));
-  command[2] = std::max(-1.0f, std::min(1.0f, command[2]));
+  command[0] = std::max(-rapid_rl::kMaxCommandLinearX,
+                        std::min(rapid_rl::kMaxCommandLinearX, command[0]));
+  command[1] = std::max(-rapid_rl::kMaxCommandLinearY,
+                        std::min(rapid_rl::kMaxCommandLinearY, command[1]));
+  command[2] = std::max(-rapid_rl::kMaxCommandYaw,
+                        std::min(rapid_rl::kMaxCommandYaw, command[2]));
 
   if (command.norm() < 0.05f) {
     command.setZero();
