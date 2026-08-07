@@ -81,34 +81,33 @@ inline float Clamp(float value, float lower, float upper) {
   return value < lower ? lower : (value > upper ? upper : value);
 }
 
-// Isaac Gym, the Mini Cheetah URDF, and the local controller all use:
-// FR, FL, RR, RL; each leg is hip/abad, thigh, calf.
-// Keep these identity maps explicit so either side cannot silently reintroduce
-// the obsolete FL/FR/RL/RR permutation.
+// Isaac Gym 训练策略的实际顺序：左前腿、右前腿、左后腿、右后腿；
+// Cheetah 控制器的实际顺序：右前腿、左前腿、右后腿、左后腿。
+// 每条腿内部均为外展关节、大腿关节、小腿关节。
 inline const std::array<int, kActionDim>& PolicyToRobotMap() {
   static const std::array<int, kActionDim> map = {
-      0, 1, 2,
       3, 4, 5,
-      6, 7, 8,
-      9, 10, 11};
+      0, 1, 2,
+      9, 10, 11,
+      6, 7, 8};
   return map;
 }
 
 inline const std::array<int, kActionDim>& RobotToPolicyMap() {
   static const std::array<int, kActionDim> map = {
-      0, 1, 2,
       3, 4, 5,
-      6, 7, 8,
-      9, 10, 11};
+      0, 1, 2,
+      9, 10, 11,
+      6, 7, 8};
   return map;
 }
 
 inline Eigen::Matrix<float, kActionDim, 1> DefaultJointPositionPolicyOrder() {
   Eigen::Matrix<float, kActionDim, 1> q;
-  q << -0.1f, -0.8f, 1.62f,
-        0.1f, -0.8f, 1.62f,
+  q <<  0.1f, -0.8f, 1.62f,
        -0.1f, -0.8f, 1.62f,
-        0.1f, -0.8f, 1.62f;
+        0.1f, -0.8f, 1.62f,
+       -0.1f, -0.8f, 1.62f;
   return q;
 }
 
