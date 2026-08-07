@@ -41,10 +41,11 @@ int main() {
   }
   const auto policy_order = rapid_rl::RobotToPolicyOrder(robot_order);
   const auto round_trip = rapid_rl::PolicyToRobotOrder(policy_order);
-  ok &= check((policy_order - robot_order).cwiseAbs().maxCoeff() == 0.0f,
-              "FR/FL/RR/RL identity mapping");
   ok &= check((round_trip - robot_order).cwiseAbs().maxCoeff() == 0.0f,
-              "joint order round trip");
+              "关节顺序双向转换后保持不变");
+  ok &= check(near(policy_order[0], 3.0f) && near(policy_order[3], 0.0f) &&
+                  near(policy_order[6], 9.0f) && near(policy_order[9], 6.0f),
+              "控制器右前左前右后左后转换为策略左前右前左后右后");
 
   Eigen::Matrix<float, 3, 1> base_angular_velocity;
   base_angular_velocity << 4.0f, -8.0f, 400.0f;
@@ -54,12 +55,28 @@ int main() {
   command << 2.0f, -2.0f, 2.0f;
   const auto q_default = rapid_rl::DefaultJointPositionPolicyOrder();
   Vec12f expected_q_default;
-  expected_q_default << -0.1f, -0.8f, 1.62f,
-                         0.1f, -0.8f, 1.62f,
-                        -0.1f, -0.8f, 1.62f,
-                         0.1f, -0.8f, 1.62f;
+  expected_q_default << 0.1f, -0.8f, 1.62f,
+                       -0.1f, -0.8f, 1.62f,
+                        0.1f, -0.8f, 1.62f,
+                       -0.1f, -0.8f, 1.62f;
   ok &= check((q_default - expected_q_default).cwiseAbs().maxCoeff() == 0.0f,
-              "exact FR/FL/RR/RL default joint angles");
+              "策略左前右前左后右后默认关节角");
+  const auto q_default_robot = rapid_rl::PolicyToRobotOrder(q_default);
+  Vec12f expected_q_default_robot;
+  expected_q_default_robot << -0.1f, -0.8f, 1.62f,
+                               0.1f, -0.8f, 1.62f,
+                              -0.1f, -0.8f, 1.62f,
+                               0.1f, -0.8f, 1.62f;
+  ok &= check(
+      (q_default_robot - expected_q_default_robot).cwiseAbs().maxCoeff() ==
+          0.0f,
+      "控制器右前左前右后左后默认关节角");
+  const auto default_policy_from_robot =
+      rapid_rl::RobotToPolicyOrder(expected_q_default_robot);
+  ok &= check((default_policy_from_robot - q_default)
+                      .cwiseAbs()
+                      .maxCoeff() == 0.0f,
+              "控制器默认站姿转换后策略关节位置偏差为零");
   Vec12f q_policy = q_default;
   Vec12f qd_policy;
   Vec12f last_action;

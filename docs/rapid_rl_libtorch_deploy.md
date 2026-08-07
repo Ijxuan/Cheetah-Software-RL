@@ -36,9 +36,11 @@ history:
 Each frame is clipped to `[-100,100]`. The model contains the HIM estimator,
 which produces estimated velocity and latent features internally, plus the
 actor. Therefore deployment must not prepend measured `vBody` or otherwise
-shift these fields. Policy joint order and controller joint order are both
-`FR, FL, RR, RL`, with no additional leg permutation. Observation history is
-cleared when entering `RL_JOINT_PD`.
+shift these fields. The Isaac Gym policy joint order is front-left,
+front-right, rear-left, rear-right. The Cheetah controller order is
+front-right, front-left, rear-right, rear-left, so deployment swaps left and
+right legs at the policy boundary. Observation history is cleared when entering
+`RL_JOINT_PD`.
 
 ## CPU-only LibTorch
 
