@@ -22,6 +22,9 @@ class PeriodicTask {
                std::string name);
   void start();
   void stop();
+  // Configure before start(); negative values leave the property unchanged.
+  void setThreadRealtimePriority(int fifo_priority);
+  void setThreadCpuAffinity(int cpu_core);
   void printStatus();
   void clearMax();
   bool isSlow();
@@ -61,6 +64,8 @@ class PeriodicTask {
   float _maxRuntime = 0;
   std::string _name;
   std::thread _thread;
+  int _threadFifoPriority = -1;
+  int _threadCpuCore = -1;
 };
 
 /*!

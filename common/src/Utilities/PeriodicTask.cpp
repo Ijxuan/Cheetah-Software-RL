@@ -5,10 +5,16 @@
  */
 #ifdef linux
  #include <sys/timerfd.h>
+ #include <pthread.h>
+ #include <sched.h>
 #endif
 
 #include <unistd.h>
+#include <cerrno>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
 
 #include "Utilities/PeriodicTask.h"
 #include "Utilities/Timer.h"
@@ -39,6 +45,20 @@ void PeriodicTask::start() {
   init();
   _running = true;
   _thread = std::thread(&PeriodicTask::loopFunction, this);
+}
+
+void PeriodicTask::setThreadRealtimePriority(int fifo_priority) {
+  if (_running) {
+    throw std::logic_error("Cannot change periodic task priority after start");
+  }
+  _threadFifoPriority = fifo_priority;
+}
+
+void PeriodicTask::setThreadCpuAffinity(int cpu_core) {
+  if (_running) {
+    throw std::logic_error("Cannot change periodic task affinity after start");
+  }
+  _threadCpuCore = cpu_core;
 }
 
 /*!
@@ -92,6 +112,71 @@ void PeriodicTask::printStatus() {
  */
 void PeriodicTask::loopFunction() {
 #ifdef linux
+  if (_threadCpuCore >= 0) {
+    if (_threadCpuCore >= CPU_SETSIZE) {
+      fprintf(stderr,
+              "[PeriodicTask] FATAL: %s CPU %d exceeds CPU_SETSIZE\n",
+              _name.c_str(), _threadCpuCore);
+      std::abort();
+    }
+    cpu_set_t cpu_set;
+    CPU_ZERO(&cpu_set);
+    CPU_SET(_threadCpuCore, &cpu_set);
+    const int affinity_result =
+        pthread_setaffinity_np(pthread_self(), sizeof(cpu_set), &cpu_set);
+    if (affinity_result != 0) {
+      fprintf(stderr,
+              "[PeriodicTask] FATAL: cannot pin %s to CPU %d: %s\n",
+              _name.c_str(), _threadCpuCore, strerror(affinity_result));
+      std::abort();
+    }
+  }
+
+  if (_threadFifoPriority >= 0) {
+    sched_param params;
+    params.sched_priority = _threadFifoPriority;
+    const int scheduler_result =
+        pthread_setschedparam(pthread_self(), SCHED_FIFO, &params);
+    if (scheduler_result != 0) {
+      fprintf(stderr,
+              "[PeriodicTask] FATAL: cannot set %s to SCHED_FIFO %d: %s\n",
+              _name.c_str(), _threadFifoPriority,
+              strerror(scheduler_result));
+      std::abort();
+    }
+  }
+
+  int actual_policy = 0;
+  sched_param actual_params;
+  actual_params.sched_priority = 0;
+  const int verify_result =
+      pthread_getschedparam(pthread_self(), &actual_policy, &actual_params);
+  const int actual_cpu = sched_getcpu();
+  if (verify_result != 0) {
+    fprintf(stderr, "[PeriodicTask] FATAL: cannot verify %s scheduler: %s\n",
+            _name.c_str(), strerror(verify_result));
+    std::abort();
+  }
+  printf("[PeriodicTask] Scheduling verified: %s policy=%s priority=%d cpu=%d"
+         " requested_cpu=%d\n",
+         _name.c_str(), actual_policy == SCHED_FIFO ? "SCHED_FIFO" : "OTHER",
+         actual_params.sched_priority, actual_cpu, _threadCpuCore);
+  fflush(stdout);
+  if (_threadFifoPriority >= 0 &&
+      (actual_policy != SCHED_FIFO ||
+       actual_params.sched_priority != _threadFifoPriority)) {
+    fprintf(stderr,
+            "[PeriodicTask] FATAL: %s scheduler verification mismatch\n",
+            _name.c_str());
+    std::abort();
+  }
+  if (_threadCpuCore >= 0 && actual_cpu != _threadCpuCore) {
+    fprintf(stderr,
+            "[PeriodicTask] FATAL: %s started on CPU %d instead of CPU %d\n",
+            _name.c_str(), actual_cpu, _threadCpuCore);
+    std::abort();
+  }
+
   auto timerFd = timerfd_create(CLOCK_MONOTONIC, 0);
 #endif
   int seconds = (int)_period;

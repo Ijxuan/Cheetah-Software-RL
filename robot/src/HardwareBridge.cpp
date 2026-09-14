@@ -12,6 +12,7 @@
 #include <cstring>
 #include <thread>
 #include "Configuration.h"
+#include "RapidRLBuildConfig.h"
 
 #include "HardwareBridge.h"
 #include "rt/rt_rc_interface.h"
@@ -346,9 +347,13 @@ void MiniCheetahHardwareBridge::run() {
   //     &taskManager, .002, "spi", &MiniCheetahHardwareBridge::runSpi, this);
   // spiTask.start();
 
-  // EtherCAT task (replace SPI communication loop, 250us period)
+  // EtherCAT task (1 ms period). Configure this thread explicitly instead of
+  // relying on the process-wide scheduler inherited by every worker thread.
   PeriodicMemberFunction<MiniCheetahHardwareBridge> ecatTask(
       &taskManager, .001, "ecat-mini", &MiniCheetahHardwareBridge::runSpi, this);
+  ecatTask.setThreadCpuAffinity(rapid_rl::build_config::kEthercatCpuCore);
+  ecatTask.setThreadRealtimePriority(
+      rapid_rl::build_config::kEthercatRtPriority);
   ecatTask.start();
 
   // microstrain

@@ -35,6 +35,8 @@ set(RAPID_RL_WARMUP_ITERS "20" CACHE STRING "Warmup iterations before running th
 set(RAPID_RL_MAX_INFERENCE_MS "20.0" CACHE STRING "Soft warning threshold for one rapid RL inference")
 set(RAPID_RL_TORCH_NUM_THREADS "1" CACHE STRING "Torch intra-op CPU thread count for rapid RL inference")
 option(RAPID_RL_DEBUG_LCM_STATE "Publish read-only rl_robot_state LCM debug state" ON)
+set(RAPID_RL_ETHERCAT_CPU_CORE "0" CACHE STRING "Dedicated logical CPU for the EtherCAT task")
+set(RAPID_RL_ETHERCAT_RT_PRIORITY "99" CACHE STRING "SCHED_FIFO priority for EtherCAT (1-99)")
 
 # Resolve machine-specific LibTorch/MKL locations before validating them.  The
 # resolver repairs stale CMake cache paths and searches relative to this source
@@ -194,6 +196,13 @@ if(NOT RAPID_RL_TORCH_NUM_THREADS MATCHES "^[1-9][0-9]*$")
 endif()
 if(NOT RAPID_RL_MAX_INFERENCE_MS MATCHES "^[0-9]+(\\.[0-9]+)?$")
   message(FATAL_ERROR "RAPID_RL_MAX_INFERENCE_MS must be a non-negative number")
+endif()
+if(NOT RAPID_RL_ETHERCAT_CPU_CORE MATCHES "^[0-9]+$")
+  message(FATAL_ERROR "RAPID_RL_ETHERCAT_CPU_CORE must be a non-negative integer")
+endif()
+if(NOT RAPID_RL_ETHERCAT_RT_PRIORITY MATCHES "^[1-9][0-9]*$" OR
+   RAPID_RL_ETHERCAT_RT_PRIORITY GREATER 99)
+  message(FATAL_ERROR "RAPID_RL_ETHERCAT_RT_PRIORITY must be an integer from 1 to 99")
 endif()
 
 get_filename_component(RAPID_RL_CHECKPOINT_DIR
