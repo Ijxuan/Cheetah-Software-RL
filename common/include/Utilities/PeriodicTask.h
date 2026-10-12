@@ -10,6 +10,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <cstdint>
 
 class PeriodicTaskManager;
 
@@ -53,6 +54,11 @@ class PeriodicTask {
    */
   float getMaxRuntime() { return _maxRuntime; }
 
+  /*!
+   * Get the maximum number of timer periods missed in one wakeup
+   */
+  uint64_t getMaxMissedPeriods() { return _maxMissedPeriods; }
+
  private:
   void loopFunction();
 
@@ -66,6 +72,7 @@ class PeriodicTask {
   std::thread _thread;
   int _threadFifoPriority = -1;
   int _threadCpuCore = -1;
+  uint64_t _maxMissedPeriods = 0;
 };
 
 /*!

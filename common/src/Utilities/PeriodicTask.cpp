@@ -90,6 +90,7 @@ bool PeriodicTask::isSlow() {
 void PeriodicTask::clearMax() {
   _maxPeriod = 0;
   _maxRuntime = 0;
+  _maxMissedPeriods = 0;
 }
 
 /*!
@@ -98,12 +99,14 @@ void PeriodicTask::clearMax() {
 void PeriodicTask::printStatus() {
   if (!_running) return;
   if (isSlow()) {
-    printf_color(PrintColor::Red, "|%-20s|%6.4f|%6.4f|%6.4f|%6.4f|%6.4f\n",
+        printf_color(PrintColor::Red, "|%-20s|%6.4f|%6.4f|%6.4f|%6.4f|%6.4f|%llu\n",
                  _name.c_str(), _lastRuntime, _maxRuntime, _period,
-                 _lastPeriodTime, _maxPeriod);
+           _lastPeriodTime, _maxPeriod,
+           static_cast<unsigned long long>(_maxMissedPeriods));
   } else {
-    printf("|%-20s|%6.4f|%6.4f|%6.4f|%6.4f|%6.4f\n", _name.c_str(),
-           _lastRuntime, _maxRuntime, _period, _lastPeriodTime, _maxPeriod);
+    printf("|%-20s|%6.4f|%6.4f|%6.4f|%6.4f|%6.4f|%llu\n", _name.c_str(),
+          _lastRuntime, _maxRuntime, _period, _lastPeriodTime, _maxPeriod,
+          static_cast<unsigned long long>(_maxMissedPeriods));
   }
 }
 
@@ -204,7 +207,11 @@ void PeriodicTask::loopFunction() {
     _lastRuntime = (float)t.getSeconds();
 #ifdef linux
     int m = read(timerFd, &missed, sizeof(missed));
-    (void)m;
+    if (m == sizeof(missed)) {
+      const uint64_t missedPeriods = missed > 0 ? missed - 1 : 0;
+      _maxMissedPeriods = std::max(
+          _maxMissedPeriods, static_cast<uint64_t>(missedPeriods));
+    }
 #endif
     _maxPeriod = std::max(_maxPeriod, _lastPeriodTime);
     _maxRuntime = std::max(_maxRuntime, _lastRuntime);
@@ -226,8 +233,8 @@ void PeriodicTaskManager::addTask(PeriodicTask* task) {
  */
 void PeriodicTaskManager::printStatus() {
   printf("\n----------------------------TASKS----------------------------\n");
-  printf("|%-20s|%-6s|%-6s|%-6s|%-6s|%-6s\n", "name", "rt", "rt-max", "T-des",
-         "T-act", "T-max");
+    printf("|%-20s|%-6s|%-6s|%-6s|%-6s|%-6s|%-6s\n", "name", "rt", "rt-max",
+      "T-des", "T-act", "T-max", "miss-max");
   printf("-----------------------------------------------------------\n");
   for (auto& task : _tasks) {
     task->printStatus();

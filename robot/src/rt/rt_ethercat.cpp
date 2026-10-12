@@ -49,6 +49,10 @@ static int expectedWKC;                  // 期望工作计数值（用于链路
 static volatile int wkc;                 // 当前周期实际工作计数值
 static boolean inOP;                     // EtherCAT 网络是否已进入 OP 状态
 static bool ecat_initialized = false;    // EtherCAT 初始化是否完成
+static int wkc_err_count = 0;
+static int wkc_err_iteration_count = 0;
+static int wkc_err_noframe_count = 0;
+static int wkc_err_low_count = 0;
 // Single source of truth for EtherCAT NIC name.
 // Change only this value when switching network adapters.
 static const char* kDefaultAdapter = "enp86s0";//thinkbook： enp0s31f6  nuc： enp86s0
@@ -408,12 +412,29 @@ static void rt_ethercat_shutdown() {
   ec_close();
 }
 
+static void print_ethercat_diagnostics(const char* reason) {
+  printf("[EtherCAT Diagnostics] reason=%s wkc=%d expectedWKC=%d "
+         "noframe=%d low_wkc=%d window_errors=%d window_cycles=%d\n",
+         reason, wkc, expectedWKC, wkc_err_noframe_count,
+         wkc_err_low_count, wkc_err_count, wkc_err_iteration_count);
+  if (ec_slavecount > 0) {
+    ec_readstate();
+    for (int i = 1; i <= ec_slavecount; ++i) {
+      printf("[EtherCAT Diagnostics] slave=%d state=0x%2.2x "
+             "ALstatus=0x%4.4x (%s)\n",
+             i, ec_slave[i].state, ec_slave[i].ALstatuscode,
+             ec_ALstatuscode2string(ec_slave[i].ALstatuscode));
+    }
+  }
+}
+
 static void rt_ethercat_shutdown_hook() { rt_ethercat_shutdown(); }
 
 static void degraded_handler() {
   //shut of gpio enables
   // estop();
   printf("[EtherCAT Error] Logging error...\n");
+  print_ethercat_diagnostics("degraded");
   time_t current_time = time(NULL);
   char* time_str = ctime(&current_time);
   printf("ESTOP. EtherCAT became degraded at %s.\n", time_str);
@@ -530,9 +551,6 @@ void rt_ethercat_init(const char* ifname) {
 /**@brief Maximum number of etherCAT errors before a fault per period of loop iterations */
 #define K_ETHERCAT_ERR_MAX 20
 
-static int wkc_err_count = 0;
-static int wkc_err_iteration_count = 0;
-
 //initiate etherCAT communication
 /** @brief Send and receive data over EtherCAT
  *
@@ -548,10 +566,12 @@ void rt_ethercat_run()
   }
 
   //check connection
-  if(wkc_err_iteration_count > K_ETHERCAT_ERR_PERIOD)
+  if(wkc_err_iteration_count >= K_ETHERCAT_ERR_PERIOD)
   {
     wkc_err_count = 0;
     wkc_err_iteration_count = 0;
+    wkc_err_noframe_count = 0;
+    wkc_err_low_count = 0;
   }
   if(wkc_err_count > K_ETHERCAT_ERR_MAX)
   {
@@ -572,10 +592,16 @@ void rt_ethercat_run()
 
 
   //check for dropped packet
-  if(wkc < expectedWKC)
-  {
-    printf("\x1b[31m[EtherCAT Error] Dropped packet (Bad WKC!)\x1b[0m\n");
-    wkc_err_count++;
+  if (wkc == EC_NOFRAME) {
+    ++wkc_err_noframe_count;
+    ++wkc_err_count;
+    printf("[EtherCAT Error] Receive timeout: no frame (wkc=%d, expected=%d)\n",
+           wkc, expectedWKC);
+  } else if (wkc < expectedWKC) {
+    ++wkc_err_low_count;
+    ++wkc_err_count;
+    printf("[EtherCAT Error] Incomplete frame: low WKC (wkc=%d, expected=%d)\n",
+           wkc, expectedWKC);
   }
   wkc_err_iteration_count++;
 }
