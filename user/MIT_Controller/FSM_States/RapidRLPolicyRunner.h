@@ -5,9 +5,8 @@
 #include <string>
 #include <vector>
 
-#ifdef USE_LIBTORCH_RL
-#include <torch/script.h>
-#endif
+#include <memory>
+#include <onnxruntime_cxx_api.h>
 
 #include "RapidRLPolicyConfig.h"
 
@@ -21,7 +20,7 @@ struct InferenceTimingSummary {
   float max_ms = 0.0f;
 };
 
-class LibtorchPolicyRunner {
+class OnnxPolicyRunner {
  public:
   using Vec3f = Eigen::Matrix<float, 3, 1>;
   using Vec12f = Eigen::Matrix<float, kActionDim, 1>;
@@ -65,10 +64,13 @@ class LibtorchPolicyRunner {
   Eigen::Matrix<float, kObsDim, 1> observation_history_ =
       Eigen::Matrix<float, kObsDim, 1>::Zero();
 
-#ifdef USE_LIBTORCH_RL
-  torch::jit::script::Module policy_;
-  torch::Tensor policy_input_tensor_;
-#endif
+  bool runPolicy(Vec12f* action, std::string* error);
+  std::unique_ptr<Ort::Env> env_;
+  std::unique_ptr<Ort::Session> session_;
+  Ort::Value policy_input_tensor_{nullptr};
+  std::string input_name_;
+  std::string output_name_;
+
 };
 
 }  // namespace rapid_rl

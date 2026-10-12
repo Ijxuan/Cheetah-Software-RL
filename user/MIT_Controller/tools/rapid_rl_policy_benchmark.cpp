@@ -60,7 +60,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  rapid_rl::LibtorchPolicyRunner runner;
+  rapid_rl::OnnxPolicyRunner runner;
   if (!runner.load()) {
     std::cerr << "[LeggedGymRLBenchmark] failed to load policy: "
               << runner.error() << std::endl;
@@ -71,27 +71,27 @@ int main(int argc, char** argv) {
             << std::endl;
   std::cout << "[LeggedGymRLBenchmark] input_shape=" << runner.inputShape()
             << " action_shape=" << runner.actionShape() << std::endl;
-  std::cout << "[LeggedGymRLBenchmark] torch_threads="
-            << rapid_rl::build_config::kTorchNumThreads
+  std::cout << "[LeggedGymRLBenchmark] onnx_threads="
+            << rapid_rl::build_config::kOnnxNumThreads
             << " iterations=" << iterations << std::endl;
 
-  rapid_rl::LibtorchPolicyRunner::Vec3f base_angular_velocity;
+  rapid_rl::OnnxPolicyRunner::Vec3f base_angular_velocity;
   base_angular_velocity.setZero();
-  rapid_rl::LibtorchPolicyRunner::Vec3f projected_gravity;
+  rapid_rl::OnnxPolicyRunner::Vec3f projected_gravity;
   projected_gravity << 0.0f, 0.0f, -1.0f;
-  rapid_rl::LibtorchPolicyRunner::Vec3f command;
+  rapid_rl::OnnxPolicyRunner::Vec3f command;
   command.setZero();
-  rapid_rl::LibtorchPolicyRunner::Vec12f q_policy =
+  rapid_rl::OnnxPolicyRunner::Vec12f q_policy =
       rapid_rl::DefaultJointPositionPolicyOrder();
-  rapid_rl::LibtorchPolicyRunner::Vec12f qd_policy;
+  rapid_rl::OnnxPolicyRunner::Vec12f qd_policy;
   qd_policy.setZero();
-  rapid_rl::LibtorchPolicyRunner::Vec12f last_action;
+  rapid_rl::OnnxPolicyRunner::Vec12f last_action;
   last_action.setZero();
-  rapid_rl::LibtorchPolicyRunner::Vec12f rejected_action;
-  rapid_rl::LibtorchPolicyRunner::Vec12f rejected_target;
+  rapid_rl::OnnxPolicyRunner::Vec12f rejected_action;
+  rapid_rl::OnnxPolicyRunner::Vec12f rejected_target;
   float rejected_time_ms = 0.0f;
   std::string rejected_error;
-  rapid_rl::LibtorchPolicyRunner::Vec3f invalid_command = command;
+  rapid_rl::OnnxPolicyRunner::Vec3f invalid_command = command;
   invalid_command[0] = std::numeric_limits<float>::infinity();
   if (runner.infer(base_angular_velocity, projected_gravity, invalid_command,
                    q_policy, qd_policy, last_action,
@@ -104,11 +104,11 @@ int main(int argc, char** argv) {
 
   std::vector<float> timings;
   timings.reserve(static_cast<size_t>(iterations));
-  rapid_rl::LibtorchPolicyRunner::Vec12f first_action;
+  rapid_rl::OnnxPolicyRunner::Vec12f first_action;
   first_action.setZero();
   for (int i = 0; i < iterations; ++i) {
-    rapid_rl::LibtorchPolicyRunner::Vec12f action;
-    rapid_rl::LibtorchPolicyRunner::Vec12f target_q;
+    rapid_rl::OnnxPolicyRunner::Vec12f action;
+    rapid_rl::OnnxPolicyRunner::Vec12f target_q;
     float inference_time_ms = 0.0f;
     std::string error;
     if (!runner.infer(base_angular_velocity, projected_gravity, command,
@@ -128,6 +128,22 @@ int main(int argc, char** argv) {
     }
     last_action = action;
     timings.push_back(inference_time_ms);
+  }
+
+  // Reset must restore the same first inference after a long action history.
+  runner.resetObservationHistory();
+  last_action.setZero();
+  rapid_rl::OnnxPolicyRunner::Vec12f reset_action;
+  rapid_rl::OnnxPolicyRunner::Vec12f reset_target;
+  float reset_time_ms = 0.0f;
+  std::string reset_error;
+  if (!runner.infer(base_angular_velocity, projected_gravity, command,
+                    q_policy, qd_policy, last_action, &reset_action,
+                    &reset_target, &reset_time_ms, &reset_error) ||
+      (reset_action - first_action).cwiseAbs().maxCoeff() > 1e-5f) {
+    std::cerr << "[LeggedGymRLBenchmark] history reset failed: "
+              << reset_error << std::endl;
+    return 6;
   }
 
   const TimingStats stats = computeTimingStats(timings);

@@ -11,7 +11,7 @@
 #include "rl_robot_state_lcmt.hpp"
 
 /**
- * LibTorch state for the legged_gym Mini Cheetah policy.
+ * ONNX Runtime state for the legged_gym Mini Cheetah policy.
  *
  * This FSM state remains the only writer to the leg controller, so all final
  * safety checks stay in the C++ control process. LCM is only used for optional
@@ -36,7 +36,7 @@ class FSM_State_RLJointPD : public FSM_State<T> {
 
   void publishRobotState(int64_t now_us);
   void commandTarget(const Vec12f& target_q_robot);
-  bool runLibtorchPolicy(int64_t now_us);
+  bool runOnnxPolicy(int64_t now_us);
   bool acceptPolicyOutput(const Vec12f& action_policy,
                           const Vec12f& target_policy,
                           bool stop_on_reject);
@@ -50,7 +50,7 @@ class FSM_State_RLJointPD : public FSM_State<T> {
   lcm::LCM _stateLCM;
   rapid_rl::PdGainProfile _pdGainProfile = rapid_rl::PdGainProfile::kRealRobot;
   bool _policyReady = false;
-  std::unique_ptr<rapid_rl::LibtorchPolicyRunner> _libtorchRunner;
+  std::unique_ptr<rapid_rl::OnnxPolicyRunner> _onnxRunner;
 
   int64_t _stateSequence = 0;
   int64_t _lastStatePublishTimeUs = 0;

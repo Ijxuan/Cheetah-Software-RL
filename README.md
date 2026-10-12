@@ -4,7 +4,7 @@
 控制器开发。原始工程的构建、仿真和硬件说明可参考
 [MIT Cheetah-Software](https://github.com/mit-biomimetics/Cheetah-Software)。
 
-当前 `RL_JOINT_PD` 使用 C++ 控制进程内的 CPU LibTorch 推理，直接加载一个
+当前 `RL_JOINT_PD` 使用 C++ 控制进程内的 CPU ONNX Runtime 推理，直接加载一个
 由 `legged_gym` 导出的确定性 Actor。其他 FSM 状态、模式切换和硬件控制链路
 保持原样。`RL_JOINT_PD` 对应的控制模式常量为 `K_RL_JOINT_PD=53`。
 
@@ -13,31 +13,17 @@
 运行时只加载：
 
 ```text
-rl-checkpoints/model_1000.jit
+rl-checkpoints/onnx/policy.onnx
 ```
 
-该文件来自 HIMLoco 训练运行：
+当前文件的导出说明标注来源为
+`rough_minich/Oct12_09-14-06_smoke_minich/model_1000.pt`。
+网络包含 HIM encoder、latent 归一化和 Actor，固定 batch=1，输入
+`obs: float32 [1,270]`，输出 `actions: float32 [1,12]`。
+完整导出说明见 [README_ONNX.md](rl-checkpoints/onnx/README_ONNX.md)。
 
-```text
-rough_minich/Aug06_16-16-21_smoke_minich/model_1000.pt
-```
-
-导出文件和部署副本的 SHA256 均为：
-
-```text
-f54bcdc97d274a26adaa341bd2b9073807d64261f9f85a139c71852228e39b0c
-```
-
-该 TorchScript 包含 HIM 速度估计器和 Actor，不是旧的单 Actor flat policy。输入和
-输出均为 CPU `float32`：
-
-```text
-input_shape=[1, 270]
-action_shape=[1, 12]
-```
-
-目录中原有的 `adaptation_module_latest.jit`、`body_latest.jit` 和
-`legged_gym_policy_latest.jit` 可以保留，但 `RL_JOINT_PD` 不再加载它们。
+加载时自动读取输入输出名称，检查 float32 和固定形状，执行预热并拒绝非有限动作。
+运行时仅加载这个 ONNX 文件。
 
 ## 270 维 HIM 历史观测
 
@@ -59,7 +45,7 @@ action_shape=[1, 12]
 | `21:33` | 12 | 当前关节角速度 | `qd * 0.05` |
 | `33:45` | 12 | 上一次 Actor 输出 | `last_action` |
 
-新策略的 actor 不直接接收机身线速度。TorchScript 内的 HIM estimator 根据 6 帧
+新策略的 actor 不直接接收机身线速度。ONNX 网络内的 HIM estimator 根据 6 帧
 历史观测估计 3 维速度和 16 维 latent，再与当前帧的 45 维观测拼接后送入 actor。
 进入 `RL_JOINT_PD` 时历史缓冲清零；之后每次 50 Hz 推理都把最新帧放在最前并
 将旧帧向后移动。每帧拼接完成后逐元素裁剪到 `[-100,100]`。速度命令范围与
@@ -119,58 +105,180 @@ PD 增益按使用环境严格分开，训练参数不会直接下发到实机�
 `tauFeedForward=0`，最终目标仍经过 `RL_JOINT_PD` 现有的关节范围、姿态和
 目标变化速率检查。
 
-## 实机 CPU-only LibTorch 编译
+## ONNX 依赖安装与 CPU 编译
 
-机载电脑应使用 CPU-only LibTorch。当前部署已验证兼容非 cxx11-abi 的
-LibTorch 1.10.1 CPU 包，即 `_GLIBCXX_USE_CXX11_ABI=0`。推荐把包放在源码根
-目录下的相对位置：
+### 新增依赖及本次使用的版本
+
+| 依赖 | 用途 | 本次验证版本 |
+|---|---|---|
+| ONNX Runtime C/C++ CPU 包 | `mit_ctrl` 内加载和运行 `policy.onnx`，编译需要头文件，运行需要共享库 | `1.28.1`，Linux x86_64 |
+| 支持 C++17 的 C++ 编译器 | 编译 ONNX Runtime C++ 接口；仅控制器和推理基准目标使用 C++17 | GCC `9.4.0` |
+| Python `onnx`（可选） | 训练端导出、检查 ONNX 模型 | `1.17.0` |
+| Python `onnxruntime`（可选） | 训练端及离线 Python 数值对照 | `1.19.2`，CPU |
+| Python `flatbuffers`（可选） | Python ONNX Runtime 的依赖 | `24.3.25` |
+
+直接运行 C++ 控制器只需要 C/C++ 包，不需要 Python 环境。
+`pip install onnxruntime` 安装的是 Python 包，不能替代本工程的 C++ 头文件和链接库。
+此分支使用默认 CPU provider，不需要 CUDA、cuDNN、LibTorch 或 MKL。
+C++ 包内的头文件和共享库必须来自同一版本。安装来源见
+[官方安装说明](https://onnxruntime.ai/docs/install/) 和
+[ONNX Runtime 1.28.1 发布页](https://github.com/microsoft/onnxruntime/releases/tag/v1.28.1)。
+
+### 安装 C/C++ 库（推荐放在项目内）
+
+下面命令从仓库根目录执行，适用于 `uname -m` 输出为 `x86_64` 的 Linux。
+需要 `curl`、`tar`、CMake 和 C++ 编译器；Ubuntu 缺少工具时可执行：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential cmake curl ca-certificates
+```
+
+下载已验证版本的 CPU 包，校验官方发布文件的 SHA256，再解压到
+`.deps/onnxruntime`。首次安装时执行以下命令；已有其他版本时请解压到单独目录，
+通过 `ONNXRUNTIME_ROOT` 指定，避免混用头文件与共享库。
+
+```bash
+mkdir -p .deps
+curl -fL --retry 3 \
+  https://github.com/microsoft/onnxruntime/releases/download/v1.28.1/onnxruntime-linux-x64-1.28.1.tgz \
+  -o .deps/onnxruntime-linux-x64-1.28.1.tgz
+printf '%s  %s\n' \
+  '2529aef968d0ad0603365054bc46ebefa7f0fe3bc12f28c5f729c99ddffe2a81' \
+  '.deps/onnxruntime-linux-x64-1.28.1.tgz' | sha256sum -c -
+mkdir -p .deps/onnxruntime
+tar -xzf .deps/onnxruntime-linux-x64-1.28.1.tgz \
+  -C .deps/onnxruntime --strip-components=1
+```
+
+SHA256 来自[官方发布附件](https://github.com/microsoft/onnxruntime/releases/expanded_assets/v1.28.1)。
+如果目标机器是 ARM64，应选择同一发布页的 `onnxruntime-linux-aarch64-1.28.1.tgz`
+并使用对应 SHA256；本次控制器测试在 x86_64 上完成。
+`.deps/` 已被 Git 忽略，不需要将第三方二进制提交到仓库。
+
+安装后的关键目录如下（解压时保留包内的其他头文件和库）：
 
 ```text
-<源码根>/.deps/libtorch-1.10.1-cpu
+.deps/onnxruntime/
+├── include/
+│   ├── onnxruntime_c_api.h
+│   ├── onnxruntime_cxx_api.h
+│   └── ...
+└── lib/
+    ├── libonnxruntime.so
+    ├── libonnxruntime.so.1
+    ├── libonnxruntime.so.1.28.1
+    └── ...
 ```
 
-CMake 会依次接受有效的显式路径、本地配置、环境变量 `LIBTORCH_ROOT`、源码内
-`.deps` 和源码父目录的 `.deps`；因此仓库或上层工作区改名不会影响编译。旧
-`CMakeCache.txt` 中已经失效的绝对路径也会自动跳过并重新发现。
-
-以下命令假设当前位于源码根目录；首次创建实机构建目录时执行：
+`libonnxruntime.so` 用于链接，`libonnxruntime.so.1` 是本次运行时加载的 SONAME。
+请完整保留 `lib/` 及其中符号链接，不要只复制一个 `.so` 文件。
+可用以下命令检查安装：
 
 ```bash
-mkdir -p build-cpu
-cd build-cpu
-
-cmake .. -DNO_SIM=ON
-
-cmake --build . \
-  --target mit_ctrl rapid_rl_policy_benchmark rapid_rl_policy_config_test -j
+test -f .deps/onnxruntime/include/onnxruntime_cxx_api.h
+test -f .deps/onnxruntime/lib/libonnxruntime.so
+ldd .deps/onnxruntime/lib/libonnxruntime.so
 ```
 
-之后日常增量编译只需要第二条 `cmake --build . ...`，无需再次书写 LibTorch、
-MKL、CPU-only 或顶层目录路径。
+`ldd` 不应出现 `not found`。若目标系统报告 `GLIBC_*` 或 `GLIBCXX_*` 版本不足，
+需要为目标系统选择兼容的包或[在目标环境编译 ONNX Runtime](https://onnxruntime.ai/docs/build/inferencing.html)。
 
-部分 CPU LibTorch 包在最终链接时需要外部 MKL。CMake 会自动尝试有效缓存、
-`LIBTORCH_MKL_ROOT` 环境变量、激活 Conda 环境的 `$CONDA_PREFIX/lib` 和源码
-相对的 `.deps/mkl/lib`。若仍报告 `mkl_*` 符号，复制一次本地配置模板并只填写
-该机器的实际目录：
+### 配置、编译与验证
+
+项目内安装完成后，CMake 会自动发现 `.deps/onnxruntime`：
 
 ```bash
-cp ../cmake/RapidRLLocalConfig.cmake.example \
-  ../cmake/RapidRLLocalConfig.cmake
-# 编辑 ../cmake/RapidRLLocalConfig.cmake 中的
-# RAPID_RL_LOCAL_MKL_ROOT；非标准 LibTorch 位置则填 RAPID_RL_LOCAL_LIBTORCH_ROOT。
-cmake ..
+cmake -S . -B build-onnx -DNO_SIM=ON
+cmake --build build-onnx \
+  --target mit_ctrl rapid_rl_policy_benchmark rapid_rl_policy_config_test -j4
+ctest --test-dir build-onnx -R 'legged_gym_rl_policy_config|himloco_onnx_policy_inference' --output-on-failure
+./build-onnx/user/MIT_Controller/rapid_rl_policy_benchmark 1000
+ldd build-onnx/user/MIT_Controller/mit_ctrl
 ```
 
-不要直接把另一台电脑上使用 `-march=native` 编译的 `mit_ctrl` 复制到机载电脑；
-应在最终运行策略的机载电脑上重新配置和构建。
+安装在其他目录时，在首次配置中明确指定库根目录：
+
+```bash
+cmake -S . -B build-onnx -DNO_SIM=ON \
+  -DONNXRUNTIME_ROOT=/absolute/path/to/onnxruntime
+```
+
+CMake 依次尝试有效的 CMake 参数/缓存 `ONNXRUNTIME_ROOT`、本地配置
+`RAPID_RL_LOCAL_ONNXRUNTIME_ROOT`、环境变量 `ONNXRUNTIME_ROOT`、源码及父目录下的
+`.deps/onnxruntime` 和 `/opt/onnxruntime`。本地配置可这样创建：
+
+```bash
+cp cmake/RapidRLLocalConfig.cmake.example cmake/RapidRLLocalConfig.cmake
+# 编辑该文件，设置 RAPID_RL_LOCAL_ONNXRUNTIME_ROOT 为库根目录。
+```
+
+本次没有重新下载 C++ 库，而是复用了本机已有的 `1.28.1` 包，实际配置命令为：
+
+```bash
+cmake -S . -B build-onnx -DNO_SIM=ON \
+  -DONNXRUNTIME_ROOT=/home/xjtx/rl-deploy/hunter130_collection-main/hunter130_deploy/src/ec_controller/thirdparty/onnxruntime
+```
+
+该绝对路径仅记录本次环境；其他机器请使用上述项目内安装方式或自己的库路径。
+本次 `mit_ctrl`、推理基准及配置测试均编译成功，两项 CTest 通过。
+1000 次 CPU 推理的 p95 约 `0.026 ms`，最大约 `0.168 ms`；
+24 步历史输入（含重置）与 Python ONNX Runtime 对照最大绝对误差约 `1.31e-6`。
+这些结果是本机离线验证，不代表实机控制表现。
+
+默认模型为 `rl-checkpoints/onnx/policy.onnx`；可配置
+`RAPID_RL_CHECKPOINT_DIR` 与 `RAPID_RL_CHECKPOINT_FILE`。
+推理默认单线程，可通过 `RAPID_RL_ONNX_NUM_THREADS` 调整。
+请使用新构建目录 `build-onnx`，避免沿用旧 LibTorch 构建缓存。
+
+### 动态库部署
+
+CMake 为构建出的控制器配置 ONNX Runtime 库目录的 RPATH。
+直接在本机运行时无需全局安装或执行 `ldconfig`。
+部署到另一台机器时，将完整 C/C++ 包和模型一起部署，并在最终运行策略的
+机载电脑上重新配置和构建。不要复用本机 `-march=native` 生成的二进制。
+
+如果库的位置变化，应重新运行 CMake 指定新的 `ONNXRUNTIME_ROOT` 并构建。
+临时诊断动态库查找问题时，也可在仓库根目录执行：
+
+```bash
+export LD_LIBRARY_PATH="$PWD/.deps/onnxruntime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+ldd build-onnx/user/MIT_Controller/mit_ctrl
+./build-onnx/user/MIT_Controller/rapid_rl_policy_benchmark 1000
+```
+
+确认 `libonnxruntime.so.1` 指向预期目录，且所有依赖均没有 `not found`。
+
+### 可选：Python 导出与数值验证依赖
+
+已有 ONNX 模型时可跳过本节。重新导出需要训练环境中的 PyTorch 和 HIMLoco。
+本次在已有的 `gym4` 环境中，将新增 Python 依赖装到临时目录：
+
+```bash
+source /opt/miniconda3/etc/profile.d/conda.sh
+conda activate gym4
+python3 -m pip install --target /tmp/minich_onnx_deps --no-cache-dir --no-deps \
+  onnx==1.17.0 onnxruntime==1.19.2 flatbuffers==24.3.25
+PYTHONPATH=/tmp/minich_onnx_deps python3 -c \
+  'import onnx, onnxruntime; print(onnx.__version__, onnxruntime.__version__)'
+```
+
+上述 `--no-deps` 方式依赖现有 `gym4` 已提供 NumPy、protobuf、packaging 等依赖；
+在单独准备的 Python 环境中可让 pip 一并安装依赖：
+
+```bash
+python3 -m pip install onnx==1.17.0 onnxruntime==1.19.2 flatbuffers==24.3.25
+```
+
+临时目录被清理后需要重新安装，并在运行导出/验证命令时设置 `PYTHONPATH`。
+完整导出命令见 [模型导出说明](rl-checkpoints/onnx/README_ONNX.md)。
 
 ## 仿真 GUI 编译（RL 三关节 Kp/Kd 实时调参）
 
-`build-cpu` 不必重建为另一个目录。若想在它中生成 GUI，只需在该构建目录中
-重新配置一次 `NO_SIM`；LibTorch/MKL 等路径仍由上面的 CMake 配置文件处理：
+若想生成 GUI，在上面的 ONNX 构建目录中重新配置 `NO_SIM`：
 
 ```bash
-cd build-cpu
+cd build-onnx
 
 cmake .. -DNO_SIM=OFF
 
@@ -181,19 +289,19 @@ ctest --output-on-failure
 ```
 
 `NO_SIM=OFF` 只增加 Qt GUI 的 `sim` 目标，不改变 `mit_ctrl` 的 CPU-only
-LibTorch 或实机 profile。若以后要恢复无 GUI 的精简构建，在相同目录执行
+ONNX Runtime 或实机 profile。若以后要恢复无 GUI 的精简构建，在相同目录执行
 `cmake .. -DNO_SIM=ON` 即可。
 
 当前 GUI 按工作目录中的 `../config` 和 `../resources` 查找文件，因此
-`build` 或 `build-cpu` 必须直接位于源码根目录下，并从该目录启动：
+`build` 或 `build-onnx` 必须直接位于源码根目录下，并从该目录启动：
 
 ```bash
 # 终端 A
-cd build-cpu
+cd build-onnx
 ./sim/sim
 
-# 终端 B：也从同一个 build-cpu 目录启动
-cd build-cpu
+# 终端 B：也从同一个 build-onnx 目录启动
+cd build-onnx
 ./user/MIT_Controller/mit_ctrl m s
 ```
 
@@ -204,7 +312,7 @@ cd build-cpu
 
 ## 部署验证
 
-以下命令也在当前 `build` 或 `build-cpu` 目录执行。先运行观测、关节映射、
+以下命令也在当前 `build` 或 `build-onnx` 目录执行。先运行观测、关节映射、
 默认角、动作缩放和 PD 增益测试：
 
 ```bash
@@ -227,17 +335,18 @@ ldd user/MIT_Controller/mit_ctrl \
 输出应明确包含当前 HIMLoco 策略路径和形状：
 
 ```text
-[LeggedGymRLBenchmark] policy=.../rl-checkpoints/model_1000.jit
+[LeggedGymRLBenchmark] policy=.../rl-checkpoints/onnx/policy.onnx
 [LeggedGymRLBenchmark] input_shape=[1, 270] action_shape=[1, 12]
 ```
 
-验收要求为所有输出有限且 `p95 < 18 ms`。本机 100 次验证得到约
-`p95=0.043 ms`。控制器初始化时也应出现：
+验收要求为所有输出有限且 `p95 < 18 ms`。控制器初始化时也应出现：
 
 ```text
-[LeggedGymRL] Loaded LibTorch policy: .../model_1000.jit
+[LeggedGymRL] Loaded ONNX Runtime policy: .../policy.onnx
 [LeggedGymRL] Shapes: input [1, 270], action [1, 12]
 ```
 
-完整的 checkpoint 替换、CPU-only 构建和验证流程见
-[`docs/rapid_rl_libtorch_deploy.md`](docs/rapid_rl_libtorch_deploy.md)。
+ONNX Runtime 的 C++ 会话与推理接口见
+[官方 API 文档](https://onnxruntime.ai/docs/api/c/struct_ort_1_1_session.html)。
+旧 LibTorch 流程保留在 [`docs/rapid_rl_libtorch_deploy.md`](docs/rapid_rl_libtorch_deploy.md)，
+仅用于历史参考，不适用于此分支。

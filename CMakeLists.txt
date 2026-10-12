@@ -25,22 +25,16 @@ option(MINI_CHEETAH_BUILD "use compiler flags for mini cheetah computer" OFF)
 set(BUILD_TYPE_RELEASE TRUE)
 
 option(NO_SIM "Do not build simulator" OFF)
-option(USE_LIBTORCH_RL "Build the MIT controller with the in-process LibTorch RL backend" ON)
-set(LIBTORCH_ROOT "" CACHE PATH "LibTorch package root used for RL_JOINT_PD deployment")
-set(LIBTORCH_MKL_ROOT "" CACHE PATH "Optional directory containing Intel MKL shared libraries required by some CPU LibTorch packages")
-option(LIBTORCH_CPU_ONLY "Require a CPU-only LibTorch package for RL_JOINT_PD" ON)
-set(LIBTORCH_CXX11_ABI "" CACHE STRING "Explicit _GLIBCXX_USE_CXX11_ABI value for LibTorch if Torch cannot report it")
-set(RAPID_RL_CHECKPOINT_DIR "${PROJECT_SOURCE_DIR}/rl-checkpoints" CACHE PATH "Directory containing rapid RL TorchScript checkpoints")
+set(ONNXRUNTIME_ROOT "" CACHE PATH "ONNX Runtime C/C++ CPU package root")
+set(RAPID_RL_CHECKPOINT_DIR "${PROJECT_SOURCE_DIR}/rl-checkpoints/onnx" CACHE PATH "Directory containing HIMLoco ONNX policy")
+set(RAPID_RL_CHECKPOINT_FILE "policy.onnx" CACHE STRING "HIMLoco ONNX policy filename")
 set(RAPID_RL_WARMUP_ITERS "20" CACHE STRING "Warmup iterations before running the rapid RL policy")
 set(RAPID_RL_MAX_INFERENCE_MS "20.0" CACHE STRING "Soft warning threshold for one rapid RL inference")
-set(RAPID_RL_TORCH_NUM_THREADS "1" CACHE STRING "Torch intra-op CPU thread count for rapid RL inference")
+set(RAPID_RL_ONNX_NUM_THREADS "1" CACHE STRING "ONNX Runtime intra-op CPU thread count for rapid RL inference")
 option(RAPID_RL_DEBUG_LCM_STATE "Publish read-only rl_robot_state LCM debug state" ON)
 set(RAPID_RL_ETHERCAT_CPU_CORE "0" CACHE STRING "Dedicated logical CPU for the EtherCAT task")
 set(RAPID_RL_ETHERCAT_RT_PRIORITY "99" CACHE STRING "SCHED_FIFO priority for EtherCAT (1-99)")
 
-# Resolve machine-specific LibTorch/MKL locations before validating them.  The
-# resolver repairs stale CMake cache paths and searches relative to this source
-# tree, so normal commands do not depend on a workspace directory name.
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/RapidRLDependencyPaths.cmake")
 
 if(MINI_CHEETAH_BUILD)
@@ -75,124 +69,13 @@ else(MINI_CHEETAH_BUILD)
   message("**** Mini-Cheetah build disabled ****")
 endif(MINI_CHEETAH_BUILD)
 
-if(NOT USE_LIBTORCH_RL)
-  message(FATAL_ERROR "RL_JOINT_PD is LibTorch-only; configure with USE_LIBTORCH_RL=ON")
-endif()
-
 rapid_rl_resolve_dependency_paths()
-
-if(NOT LIBTORCH_ROOT)
-  message(FATAL_ERROR "LIBTORCH_ROOT could not be resolved for RL_JOINT_PD deployment")
-endif()
-if(NOT IS_DIRECTORY "${LIBTORCH_ROOT}")
-  message(FATAL_ERROR "LIBTORCH_ROOT does not exist: ${LIBTORCH_ROOT}")
-endif()
-
-foreach(RAPID_RL_TORCH_REQUIRED_LIB
-    libtorch.so
-    libtorch_cpu.so
-    libc10.so)
-  if(NOT EXISTS "${LIBTORCH_ROOT}/lib/${RAPID_RL_TORCH_REQUIRED_LIB}")
-    message(FATAL_ERROR
-      "LIBTORCH_ROOT is missing ${RAPID_RL_TORCH_REQUIRED_LIB}: ${LIBTORCH_ROOT}/lib")
-  endif()
-endforeach()
-
-if(LIBTORCH_CPU_ONLY)
-  file(GLOB RAPID_RL_CUDA_TORCH_LIBS
-    "${LIBTORCH_ROOT}/lib/libtorch_cuda*.so"
-    "${LIBTORCH_ROOT}/lib/libc10_cuda.so")
-  if(RAPID_RL_CUDA_TORCH_LIBS)
-    message(FATAL_ERROR
-      "LIBTORCH_CPU_ONLY=ON but CUDA LibTorch libraries were found: ${RAPID_RL_CUDA_TORCH_LIBS}")
-  endif()
-endif()
-
-if(NOT EXISTS "${LIBTORCH_ROOT}/share/cmake/Torch/TorchConfig.cmake")
-  message(FATAL_ERROR
-    "LIBTORCH_ROOT is missing share/cmake/Torch/TorchConfig.cmake: ${LIBTORCH_ROOT}")
-endif()
-
-set(TORCH_INCLUDE_DIRS
-  "${LIBTORCH_ROOT}/include"
-  "${LIBTORCH_ROOT}/include/torch/csrc/api/include")
-set(TORCH_LIBRARIES
-  "${LIBTORCH_ROOT}/lib/libtorch.so"
-  "${LIBTORCH_ROOT}/lib/libtorch_cpu.so"
-  "${LIBTORCH_ROOT}/lib/libc10.so")
-
-if(LIBTORCH_CPU_ONLY AND LIBTORCH_MKL_ROOT)
-  if(NOT IS_DIRECTORY "${LIBTORCH_MKL_ROOT}")
-    message(FATAL_ERROR "LIBTORCH_MKL_ROOT does not exist: ${LIBTORCH_MKL_ROOT}")
-  endif()
-
-  function(append_rapid_rl_mkl_library var_suffix lib_name versioned_name)
-    unset(RAPID_RL_MKL_${var_suffix} CACHE)
-    find_library(RAPID_RL_MKL_${var_suffix}
-      NAMES ${lib_name} ${versioned_name}
-      PATHS "${LIBTORCH_MKL_ROOT}"
-      NO_DEFAULT_PATH)
-    if(NOT RAPID_RL_MKL_${var_suffix})
-      message(FATAL_ERROR
-        "LIBTORCH_MKL_ROOT is missing ${lib_name}: ${LIBTORCH_MKL_ROOT}")
-    endif()
-    set(TORCH_LIBRARIES "${TORCH_LIBRARIES};${RAPID_RL_MKL_${var_suffix}}"
-      PARENT_SCOPE)
-  endfunction()
-
-  append_rapid_rl_mkl_library(INTEL_LP64 mkl_intel_lp64 libmkl_intel_lp64.so.2)
-  append_rapid_rl_mkl_library(GNU_THREAD mkl_gnu_thread libmkl_gnu_thread.so.2)
-  append_rapid_rl_mkl_library(CORE mkl_core libmkl_core.so.2)
-  list(APPEND TORCH_LIBRARIES ${CMAKE_DL_LIBS} pthread m)
-endif()
-
-if(NOT LIBTORCH_CPU_ONLY)
-  foreach(RAPID_RL_TORCH_OPTIONAL_LIB
-      libtorch_cuda_cpp.so
-      libtorch_cuda.so
-      libtorch_cuda_cu.so
-      libc10_cuda.so)
-    if(EXISTS "${LIBTORCH_ROOT}/lib/${RAPID_RL_TORCH_OPTIONAL_LIB}")
-      list(APPEND TORCH_LIBRARIES
-        "${LIBTORCH_ROOT}/lib/${RAPID_RL_TORCH_OPTIONAL_LIB}")
-    endif()
-  endforeach()
-endif()
-
-file(READ "${LIBTORCH_ROOT}/share/cmake/Torch/TorchConfig.cmake"
-  RAPID_RL_TORCH_CONFIG_TEXT)
-set(TORCH_CXX_FLAGS "")
-if(RAPID_RL_TORCH_CONFIG_TEXT MATCHES "_GLIBCXX_USE_CXX11_ABI=([01])")
-  set(TORCH_CXX_FLAGS "-D_GLIBCXX_USE_CXX11_ABI=${CMAKE_MATCH_1}")
-endif()
-
-set(RAPID_RL_INFERRED_CXX11_ABI "")
-if(TORCH_CXX_FLAGS MATCHES "_GLIBCXX_USE_CXX11_ABI=([01])")
-  set(RAPID_RL_INFERRED_CXX11_ABI "${CMAKE_MATCH_1}")
-endif()
-
-if(NOT "${LIBTORCH_CXX11_ABI}" STREQUAL "")
-  if(NOT LIBTORCH_CXX11_ABI MATCHES "^[01]$")
-    message(FATAL_ERROR "LIBTORCH_CXX11_ABI must be 0 or 1, got '${LIBTORCH_CXX11_ABI}'")
-  endif()
-  if(NOT "${RAPID_RL_INFERRED_CXX11_ABI}" STREQUAL "" AND
-      NOT "${LIBTORCH_CXX11_ABI}" STREQUAL "${RAPID_RL_INFERRED_CXX11_ABI}")
-    message(FATAL_ERROR
-      "LIBTORCH_CXX11_ABI=${LIBTORCH_CXX11_ABI} conflicts with Torch CMake flags ABI ${RAPID_RL_INFERRED_CXX11_ABI}")
-  endif()
-  set(RAPID_RL_LIBTORCH_CXX11_ABI "${LIBTORCH_CXX11_ABI}")
-elseif(NOT "${RAPID_RL_INFERRED_CXX11_ABI}" STREQUAL "")
-  set(RAPID_RL_LIBTORCH_CXX11_ABI "${RAPID_RL_INFERRED_CXX11_ABI}")
-else()
-  message(FATAL_ERROR
-    "Could not infer _GLIBCXX_USE_CXX11_ABI from TORCH_CXX_FLAGS; pass -DLIBTORCH_CXX11_ABI=0 or 1")
-endif()
 
 if(NOT RAPID_RL_WARMUP_ITERS MATCHES "^[0-9]+$")
   message(FATAL_ERROR "RAPID_RL_WARMUP_ITERS must be a non-negative integer")
 endif()
-if(NOT RAPID_RL_TORCH_NUM_THREADS MATCHES "^[1-9][0-9]*$")
-  message(FATAL_ERROR "RAPID_RL_TORCH_NUM_THREADS must be a positive integer")
+if(NOT RAPID_RL_ONNX_NUM_THREADS MATCHES "^[1-9][0-9]*$")
+  message(FATAL_ERROR "RAPID_RL_ONNX_NUM_THREADS must be a positive integer")
 endif()
 if(NOT RAPID_RL_MAX_INFERENCE_MS MATCHES "^[0-9]+(\\.[0-9]+)?$")
   message(FATAL_ERROR "RAPID_RL_MAX_INFERENCE_MS must be a non-negative number")
@@ -208,23 +91,12 @@ endif()
 get_filename_component(RAPID_RL_CHECKPOINT_DIR
   "${RAPID_RL_CHECKPOINT_DIR}" ABSOLUTE BASE_DIR "${PROJECT_SOURCE_DIR}")
 set(RAPID_RL_CHECKPOINT_DIR "${RAPID_RL_CHECKPOINT_DIR}" CACHE PATH
-  "Directory containing rapid RL TorchScript checkpoints" FORCE)
-set(RAPID_RL_CHECKPOINT_FILE "model_1000.jit")
+  "Directory containing HIMLoco ONNX policy" FORCE)
 if(NOT EXISTS "${RAPID_RL_CHECKPOINT_DIR}/${RAPID_RL_CHECKPOINT_FILE}")
   message(FATAL_ERROR
     "Missing HIMLoco RL checkpoint ${RAPID_RL_CHECKPOINT_DIR}/${RAPID_RL_CHECKPOINT_FILE}")
 endif()
 
-add_definitions(-DUSE_LIBTORCH_RL=1)
-add_definitions(-D_GLIBCXX_USE_CXX11_ABI=${RAPID_RL_LIBTORCH_CXX11_ABI})
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
-
-set(RAPID_RL_USE_LIBTORCH_VALUE 1)
-if(LIBTORCH_CPU_ONLY)
-  set(RAPID_RL_LIBTORCH_CPU_ONLY_VALUE 1)
-else()
-  set(RAPID_RL_LIBTORCH_CPU_ONLY_VALUE 0)
-endif()
 if(RAPID_RL_DEBUG_LCM_STATE)
   set(RAPID_RL_DEBUG_LCM_STATE_VALUE 1)
 else()
@@ -234,8 +106,7 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/RapidRLBuildConfig.h.cmake
   ${CMAKE_BINARY_DIR}/RapidRLBuildConfig.h @ONLY)
 
 message(STATUS "Rapid RL checkpoint dir: ${RAPID_RL_CHECKPOINT_DIR}")
-message(STATUS "Rapid RL LibTorch ABI: _GLIBCXX_USE_CXX11_ABI=${RAPID_RL_LIBTORCH_CXX11_ABI}")
-message(STATUS "Rapid RL LibTorch CPU-only: ${LIBTORCH_CPU_ONLY}")
+message(STATUS "Rapid RL ONNX Runtime: ${ONNXRUNTIME_ROOT}")
 
 set(CMAKE_CXX_STANDARD 14)
 

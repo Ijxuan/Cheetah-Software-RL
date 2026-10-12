@@ -13,16 +13,6 @@ include_directories("/usr/local/include/eigen3")   # lcm includes
 include_directories(${CMAKE_BINARY_DIR})
 include_directories(${PROJECT_SOURCE_DIR})
 
-if(USE_LIBTORCH_RL)
-  include_directories(SYSTEM ${TORCH_INCLUDE_DIRS})
-  set(CMAKE_EXE_LINKER_FLAGS
-    "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath,${LIBTORCH_ROOT}/lib")
-  if(LIBTORCH_MKL_ROOT)
-    set(CMAKE_EXE_LINKER_FLAGS
-      "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath,${LIBTORCH_MKL_ROOT}")
-  endif()
-endif()
-
 file(GLOB_RECURSE sources
 "./*.cpp"
 "FSM_States/*.cpp" 
@@ -52,18 +42,20 @@ target_link_libraries(mit_ctrl Goldfarb_Optimizer osqp)
 target_link_libraries(mit_ctrl WBC_Ctrl)
 target_link_libraries(mit_ctrl VisionMPC)
 target_link_libraries(mit_ctrl stdc++fs)
-if(USE_LIBTORCH_RL)
-  target_compile_definitions(mit_ctrl PRIVATE USE_LIBTORCH_RL=1)
-  target_link_libraries(mit_ctrl ${TORCH_LIBRARIES})
+target_link_libraries(mit_ctrl onnxruntime)
 
-  add_executable(rapid_rl_policy_benchmark
-    tools/rapid_rl_policy_benchmark.cpp
-    FSM_States/RapidRLPolicyRunner.cpp)
-  target_compile_definitions(rapid_rl_policy_benchmark PRIVATE USE_LIBTORCH_RL=1)
-  target_link_libraries(rapid_rl_policy_benchmark ${TORCH_LIBRARIES})
+add_executable(rapid_rl_policy_benchmark
+  tools/rapid_rl_policy_benchmark.cpp
+  FSM_States/RapidRLPolicyRunner.cpp)
+target_link_libraries(rapid_rl_policy_benchmark onnxruntime)
 
-  add_executable(rapid_rl_policy_config_test
-    tools/rapid_rl_policy_config_test.cpp)
-  add_test(NAME legged_gym_rl_policy_config
-    COMMAND rapid_rl_policy_config_test)
-endif()
+add_executable(rapid_rl_policy_config_test
+  tools/rapid_rl_policy_config_test.cpp)
+add_test(NAME legged_gym_rl_policy_config
+  COMMAND rapid_rl_policy_config_test)
+
+add_test(NAME himloco_onnx_policy_inference COMMAND rapid_rl_policy_benchmark 100)
+
+# Recent ONNX Runtime headers require C++17; keep bundled dependencies on C++14.
+set_target_properties(mit_ctrl rapid_rl_policy_benchmark PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES)

@@ -86,7 +86,7 @@ FSM_State_RLJointPD<T>::FSM_State_RLJointPD(
       _stateLCM(getLcmUrl(255)) {
   std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
             << std::endl;
-  std::cout << "Setup legged_gym LibTorch Joint PD" << std::endl;
+  std::cout << "Setup legged_gym ONNX Runtime Joint PD" << std::endl;
   std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
             << std::endl;
 
@@ -113,20 +113,20 @@ FSM_State_RLJointPD<T>::FSM_State_RLJointPD(
               << std::endl;
   }
 
-  _libtorchRunner.reset(new rapid_rl::LibtorchPolicyRunner());
-  _policyReady = _libtorchRunner->load();
+  _onnxRunner.reset(new rapid_rl::OnnxPolicyRunner());
+  _policyReady = _onnxRunner->load();
   if (!_policyReady) {
-    std::cout << "[LeggedGymRL] ERROR: failed to load LibTorch policy: "
-              << _libtorchRunner->error() << std::endl;
+    std::cout << "[LeggedGymRL] ERROR: failed to load ONNX Runtime policy: "
+              << _onnxRunner->error() << std::endl;
     return;
   }
-  std::cout << "[LeggedGymRL] Loaded LibTorch policy: "
-            << _libtorchRunner->policyPath() << std::endl;
+  std::cout << "[LeggedGymRL] Loaded ONNX Runtime policy: "
+            << _onnxRunner->policyPath() << std::endl;
   std::cout << "[LeggedGymRL] Shapes: input "
-            << _libtorchRunner->inputShape() << ", action "
-            << _libtorchRunner->actionShape() << std::endl;
-  std::cout << "[LeggedGymRL] Torch CPU threads: "
-            << rapid_rl::build_config::kTorchNumThreads << std::endl;
+            << _onnxRunner->inputShape() << ", action "
+            << _onnxRunner->actionShape() << std::endl;
+  std::cout << "[LeggedGymRL] ONNX Runtime CPU threads: "
+            << rapid_rl::build_config::kOnnxNumThreads << std::endl;
 }
 
 template <typename T>
@@ -136,7 +136,7 @@ template <typename T>
 void FSM_State_RLJointPD<T>::onEnter() {
   std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
             << std::endl;
-  std::cout << "Start legged_gym LibTorch Joint PD" << std::endl;
+  std::cout << "Start legged_gym ONNX Runtime Joint PD" << std::endl;
   std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
             << std::endl;
 
@@ -156,13 +156,13 @@ void FSM_State_RLJointPD<T>::onEnter() {
   for (int leg = 0; leg < 4; ++leg) {
     _preCommands[leg].zero();
   }
-  if (_libtorchRunner) {
-    _libtorchRunner->resetObservationHistory();
+  if (_onnxRunner) {
+    _onnxRunner->resetObservationHistory();
   }
 
   _emergencyStop = false;
   if (!_policyReady) {
-    std::cout << "[LeggedGymRL] LibTorch policy is not ready; refusing RL control"
+    std::cout << "[LeggedGymRL] ONNX Runtime policy is not ready; refusing RL control"
               << std::endl;
     _emergencyStop = true;
   }
@@ -192,7 +192,7 @@ void FSM_State_RLJointPD<T>::run() {
   }
 
   if (now_us - _lastPolicyRunTimeUs >= kPolicyDtUs) {
-    runLibtorchPolicy(now_us);
+    runOnnxPolicy(now_us);
     _lastPolicyRunTimeUs = now_us;
   }
   if (_emergencyStop) {
@@ -334,9 +334,9 @@ void FSM_State_RLJointPD<T>::commandTarget(const Vec12f& target_q_robot) {
 }
 
 template <typename T>
-bool FSM_State_RLJointPD<T>::runLibtorchPolicy(int64_t now_us) {
-  if (!_libtorchRunner || !_libtorchRunner->ready()) {
-    std::cout << "[LeggedGymRL] LibTorch policy is not ready; disabling RL"
+bool FSM_State_RLJointPD<T>::runOnnxPolicy(int64_t now_us) {
+  if (!_onnxRunner || !_onnxRunner->ready()) {
+    std::cout << "[LeggedGymRL] ONNX Runtime policy is not ready; disabling RL"
               << std::endl;
     _emergencyStop = true;
     return false;
@@ -352,34 +352,34 @@ bool FSM_State_RLJointPD<T>::runLibtorchPolicy(int64_t now_us) {
   Vec12f target_policy;
   float inference_time_ms = 0.0f;
   std::string error;
-  if (!_libtorchRunner->infer(
+  if (!_onnxRunner->infer(
           base_angular_velocity, projected_gravity, command, q_policy,
           qd_policy, _lastActionPolicy, &action_policy, &target_policy,
           &inference_time_ms, &error)) {
-    std::cout << "[LeggedGymRL] LibTorch inference failed: " << error
+    std::cout << "[LeggedGymRL] ONNX Runtime inference failed: " << error
               << std::endl;
     _emergencyStop = true;
     return false;
   }
 
   rapid_rl::InferenceTimingSummary timing;
-  if (_libtorchRunner->timingSummary(&timing) &&
+  if (_onnxRunner->timingSummary(&timing) &&
       (timing.count == 1 || timing.count == 50 || timing.count % 500 == 0)) {
-    std::cout << "[LeggedGymRL] LibTorch timing count=" << timing.count
+    std::cout << "[LeggedGymRL] ONNX Runtime timing count=" << timing.count
               << " min/mean/p95/max=" << timing.min_ms << "/"
               << timing.mean_ms << "/" << timing.p95_ms << "/"
               << timing.max_ms << " ms" << std::endl;
   }
 
   if (shouldHardStopForInference(inference_time_ms)) {
-    std::cout << "[LeggedGymRL] LibTorch inference exceeded hard timeout: "
+    std::cout << "[LeggedGymRL] ONNX Runtime inference exceeded hard timeout: "
               << inference_time_ms << " ms" << std::endl;
     _emergencyStop = true;
     return false;
   }
   if (inference_time_ms > rapid_rl::build_config::kMaxInferenceMs &&
       now_us - _lastPolicyWarningTimeUs > kPolicyWarningPeriodUs) {
-    std::cout << "[LeggedGymRL] WARNING: LibTorch inference took "
+    std::cout << "[LeggedGymRL] WARNING: ONNX Runtime inference took "
               << inference_time_ms << " ms" << std::endl;
     _lastPolicyWarningTimeUs = now_us;
   }

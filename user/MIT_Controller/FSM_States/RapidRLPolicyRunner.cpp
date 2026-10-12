@@ -6,14 +6,12 @@
 #include <sstream>
 #include <sys/stat.h>
 
-#include <ATen/Parallel.h>
 #include "RapidRLBuildConfig.h"
 
 namespace rapid_rl {
 namespace {
 
 constexpr size_t kTimingSampleCapacity = 1000;
-constexpr const char* kPolicyFileName = "model_1000.jit";
 
 std::string joinPath(const std::string& base, const std::string& leaf) {
   if (base.empty()) {
@@ -30,9 +28,6 @@ bool fileExists(const std::string& path) {
   return stat(path.c_str(), &buffer) == 0;
 }
 
-#ifdef USE_LIBTORCH_RL
-bool g_interop_threads_set = false;
-
 std::string tensorShapeString(const std::vector<int64_t>& sizes) {
   std::ostringstream stream;
   stream << "[";
@@ -46,22 +41,9 @@ std::string tensorShapeString(const std::vector<int64_t>& sizes) {
   return stream.str();
 }
 
-bool hasExpectedShape(const torch::Tensor& tensor, int64_t cols) {
-  return tensor.dim() == 2 && tensor.size(0) == 1 && tensor.size(1) == cols;
-}
-
-bool isFloat32CpuTensor(const torch::Tensor& tensor) {
-  return tensor.scalar_type() == torch::kFloat32 && tensor.device().is_cpu();
-}
-
-bool isFiniteTensor(const torch::Tensor& tensor) {
-  return torch::isfinite(tensor).all().item<bool>();
-}
-#endif
-
 }  // namespace
 
-bool LibtorchPolicyRunner::load() {
+bool OnnxPolicyRunner::load() {
   ready_ = false;
   error_.clear();
   checkpoint_dir_ = build_config::kCheckpointDir;
@@ -71,67 +53,58 @@ bool LibtorchPolicyRunner::load() {
   resetTiming();
   resetObservationHistory();
 
-#ifndef USE_LIBTORCH_RL
-  error_ = "mit_ctrl was built without USE_LIBTORCH_RL";
-  return false;
-#else
   if (checkpoint_dir_.empty()) {
     error_ = "RL checkpoint dir is empty";
     return false;
   }
 
-  policy_path_ = joinPath(checkpoint_dir_, kPolicyFileName);
+  policy_path_ = joinPath(checkpoint_dir_, build_config::kCheckpointFile);
   if (!fileExists(policy_path_)) {
-    error_ = "missing " + std::string(kPolicyFileName) + " under " +
+    error_ = "missing " + std::string(build_config::kCheckpointFile) + " under " +
              checkpoint_dir_;
     return false;
   }
 
   try {
-    at::set_num_threads(build_config::kTorchNumThreads);
-    if (!g_interop_threads_set) {
-      at::set_num_interop_threads(1);
-      g_interop_threads_set = true;
-    }
-
-    policy_ = torch::jit::load(policy_path_, torch::kCPU);
-    policy_.eval();
-
-    const auto options =
-        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-    // Keep the reusable input tensor as a normal tensor. Creating it inside
-    // InferenceMode marks it as an inference tensor, which cannot later be
-    // modified by resetObservationHistory() outside that mode.
-    policy_input_tensor_ = torch::zeros({1, kObsDim}, options);
-    if (!hasExpectedShape(policy_input_tensor_, kObsDim) ||
-        !isFloat32CpuTensor(policy_input_tensor_) ||
-        !isFiniteTensor(policy_input_tensor_)) {
-      error_ = "expected a finite CPU float32 policy input with shape [1, 270]";
+    // Use only the default CPU provider, with sequential execution.
+    session_.reset();
+    policy_input_tensor_ = Ort::Value{nullptr};
+    env_.reset(new Ort::Env(ORT_LOGGING_LEVEL_WARNING, "HIMLoco"));
+    Ort::SessionOptions options;
+    options.SetIntraOpNumThreads(build_config::kOnnxNumThreads);
+    options.SetInterOpNumThreads(1);
+    options.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+    options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    session_.reset(new Ort::Session(*env_, policy_path_.c_str(), options));
+    if (session_->GetInputCount() != 1 || session_->GetOutputCount() != 1) {
+      error_ = "expected exactly one ONNX input and one output";
       return false;
     }
-
-    torch::InferenceMode inference_mode;
-    torch::Tensor action;
-    const int validation_iters = std::max(1, build_config::kWarmupIters);
-    for (int i = 0; i < validation_iters; ++i) {
-      action = policy_.forward({policy_input_tensor_}).toTensor();
-      if (!hasExpectedShape(action, kActionDim) ||
-          !isFloat32CpuTensor(action) || !isFiniteTensor(action)) {
-        error_ = !hasExpectedShape(action, kActionDim)
-                     ? "expected action shape [1, 12], got " +
-                           tensorShapeString(action.sizes().vec())
-                     : !isFloat32CpuTensor(action)
-                           ? "expected a CPU float32 action tensor"
-                           : "policy warmup produced non-finite actions";
-        return false;
-      }
+    const auto input_type = session_->GetInputTypeInfo(0);
+    const auto output_type = session_->GetOutputTypeInfo(0);
+    const auto input_info = input_type.GetTensorTypeAndShapeInfo();
+    const auto output_info = output_type.GetTensorTypeAndShapeInfo();
+    input_shape_ = tensorShapeString(input_info.GetShape());
+    action_shape_ = tensorShapeString(output_info.GetShape());
+    if (input_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+        input_info.GetShape() != std::vector<int64_t>{1, kObsDim} ||
+        output_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+        output_info.GetShape() != std::vector<int64_t>{1, kActionDim}) {
+      error_ = "expected ONNX float32 input [1, 270] and output [1, 12], got " +
+               input_shape_ + " -> " + action_shape_;
+      return false;
     }
-
-    input_shape_ = tensorShapeString(policy_input_tensor_.sizes().vec());
-    action_shape_ = tensorShapeString(action.sizes().vec());
-  } catch (const c10::Error& e) {
-    error_ = e.what();
-    return false;
+    Ort::AllocatorWithDefaultOptions allocator;
+    input_name_ = session_->GetInputNameAllocated(0, allocator).get();
+    output_name_ = session_->GetOutputNameAllocated(0, allocator).get();
+    const int64_t shape[] = {1, kObsDim};
+    auto memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    policy_input_tensor_ = Ort::Value::CreateTensor<float>(
+        memory, observation_history_.data(), kObsDim, shape, 2);
+    Vec12f action;
+    for (int i = 0; i < std::max(1, build_config::kWarmupIters); ++i) {
+      if (!runPolicy(&action, &error_)) return false;
+    }
   } catch (const std::exception& e) {
     error_ = e.what();
     return false;
@@ -139,21 +112,13 @@ bool LibtorchPolicyRunner::load() {
 
   ready_ = true;
   return true;
-#endif
 }
 
-void LibtorchPolicyRunner::resetObservationHistory() {
+void OnnxPolicyRunner::resetObservationHistory() {
   observation_history_.setZero();
-#ifdef USE_LIBTORCH_RL
-  if (policy_input_tensor_.defined()) {
-    // The input tensor is intentionally created outside InferenceMode, so it
-    // remains safe to clear and refill between control cycles.
-    policy_input_tensor_.zero_();
-  }
-#endif
 }
 
-void LibtorchPolicyRunner::resetTiming() {
+void OnnxPolicyRunner::resetTiming() {
   timing_count_ = 0;
   timing_sum_ms_ = 0.0;
   timing_min_ms_ = 0.0f;
@@ -162,7 +127,7 @@ void LibtorchPolicyRunner::resetTiming() {
   timing_samples_.reserve(kTimingSampleCapacity);
 }
 
-void LibtorchPolicyRunner::recordTiming(float inference_time_ms) {
+void OnnxPolicyRunner::recordTiming(float inference_time_ms) {
   if (timing_count_ == 0) {
     timing_min_ms_ = inference_time_ms;
     timing_max_ms_ = inference_time_ms;
@@ -178,7 +143,7 @@ void LibtorchPolicyRunner::recordTiming(float inference_time_ms) {
   }
 }
 
-bool LibtorchPolicyRunner::timingSummary(
+bool OnnxPolicyRunner::timingSummary(
     InferenceTimingSummary* summary) const {
   if (!summary || timing_count_ == 0) {
     return false;
@@ -205,7 +170,7 @@ bool LibtorchPolicyRunner::timingSummary(
   return true;
 }
 
-bool LibtorchPolicyRunner::infer(const Vec3f& base_angular_velocity,
+bool OnnxPolicyRunner::infer(const Vec3f& base_angular_velocity,
                                  const Vec3f& projected_gravity,
                                  const Vec3f& command,
                                  const Vec12f& q_policy,
@@ -223,13 +188,13 @@ bool LibtorchPolicyRunner::infer(const Vec3f& base_angular_velocity,
   }
   if (!action || !target_q) {
     if (error) {
-      *error = "null output pointer passed to LibTorch policy";
+      *error = "null output pointer passed to ONNX Runtime policy";
     }
     return false;
   }
   if (!ready_) {
     if (error) {
-      *error = error_.empty() ? "LibTorch policy is not ready" : error_;
+      *error = error_.empty() ? "ONNX Runtime policy is not ready" : error_;
     }
     return false;
   }
@@ -243,18 +208,6 @@ bool LibtorchPolicyRunner::infer(const Vec3f& base_angular_velocity,
     return false;
   }
 
-#ifndef USE_LIBTORCH_RL
-  (void)base_angular_velocity;
-  (void)projected_gravity;
-  (void)command;
-  (void)q_policy;
-  (void)qd_policy;
-  (void)last_action;
-  if (error) {
-    *error = "mit_ctrl was built without USE_LIBTORCH_RL";
-  }
-  return false;
-#else
   try {
     const auto start = std::chrono::steady_clock::now();
     const Eigen::Matrix<float, kOneStepObsDim, 1> current_obs =
@@ -276,37 +229,7 @@ bool LibtorchPolicyRunner::infer(const Vec3f& base_angular_velocity,
             .eval();
     observation_history_.template head<kOneStepObsDim>() = current_obs;
 
-    torch::InferenceMode inference_mode;
-    float* policy_input = policy_input_tensor_.data_ptr<float>();
-    std::copy(observation_history_.data(),
-              observation_history_.data() + kObsDim, policy_input);
-
-    torch::Tensor action_t = policy_.forward({policy_input_tensor_}).toTensor();
-    if (!hasExpectedShape(action_t, kActionDim)) {
-      if (error) {
-        *error = "expected action shape [1, 12], got " +
-                 tensorShapeString(action_t.sizes().vec());
-      }
-      return false;
-    }
-    if (!isFloat32CpuTensor(action_t)) {
-      if (error) {
-        *error = "expected a CPU float32 action tensor";
-      }
-      return false;
-    }
-    if (!isFiniteTensor(action_t)) {
-      if (error) {
-        *error = "policy produced non-finite actions";
-      }
-      return false;
-    }
-
-    action_t = action_t.contiguous();
-    const float* action_data = action_t.data_ptr<float>();
-    for (int i = 0; i < kActionDim; ++i) {
-      (*action)[i] = action_data[i];
-    }
+    if (!runPolicy(action, error)) return false;
     *action = ClipPolicyAction(*action);
     *target_q = ActionToTargetQPolicyOrder(*action);
 
@@ -317,11 +240,6 @@ bool LibtorchPolicyRunner::infer(const Vec3f& base_angular_velocity,
       *inference_time_ms = elapsed_ms;
     }
     recordTiming(elapsed_ms);
-  } catch (const c10::Error& e) {
-    if (error) {
-      *error = e.what();
-    }
-    return false;
   } catch (const std::exception& e) {
     if (error) {
       *error = e.what();
@@ -329,7 +247,26 @@ bool LibtorchPolicyRunner::infer(const Vec3f& base_angular_velocity,
     return false;
   }
   return true;
-#endif
+}
+
+bool OnnxPolicyRunner::runPolicy(Vec12f* action, std::string* error) {
+  const char* inputs[] = {input_name_.c_str()};
+  const char* outputs[] = {output_name_.c_str()};
+  auto values = session_->Run(Ort::RunOptions{nullptr}, inputs,
+                              &policy_input_tensor_, 1, outputs, 1);
+  const auto info = values[0].GetTensorTypeAndShapeInfo();
+  if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+      info.GetShape() != std::vector<int64_t>{1, kActionDim}) {
+    if (error) *error = "expected ONNX float32 action [1, 12]";
+    return false;
+  }
+  const float* data = values[0].GetTensorData<float>();
+  for (int i = 0; i < kActionDim; ++i) (*action)[i] = data[i];
+  if (!action->allFinite()) {
+    if (error) *error = "ONNX policy produced non-finite actions";
+    return false;
+  }
+  return true;
 }
 
 }  // namespace rapid_rl

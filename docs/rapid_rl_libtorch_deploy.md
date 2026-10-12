@@ -1,3 +1,5 @@
+> 历史文档：此分支的 53 模式已切换到 ONNX Runtime，当前构建与部署步骤见 [README](../README.md)。
+
 # Legged Gym RL LibTorch Deployment
 
 `RL_JOINT_PD` is deployed through in-process LibTorch inference only. The
