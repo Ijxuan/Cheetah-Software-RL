@@ -50,6 +50,8 @@ void keyboard_ing();
 
 
 void get_rc_control_settings(void* settings);
+// Same OFF request as the remote; normal operator mode selection can recover.
+void request_rc_off();
 //void get_rc_channels(void* settings);
 
 void* v_memcpy(void* dest, volatile void* src, size_t n);

@@ -46,6 +46,7 @@ class FSM_State_RLJointPD : public FSM_State<T> {
   Vec3f readVelocityCommand() const;
   Vec3f readProjectedGravity() const;
   bool isOrientationUnsafe() const;
+  void requestEmergencyStop();
 
   lcm::LCM _stateLCM;
   rapid_rl::PdGainProfile _pdGainProfile = rapid_rl::PdGainProfile::kRealRobot;

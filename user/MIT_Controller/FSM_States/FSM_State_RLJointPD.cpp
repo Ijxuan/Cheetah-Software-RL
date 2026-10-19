@@ -7,6 +7,7 @@
 #include <iostream>
 
 #include <Configuration.h>
+#include <rt/rt_rc_interface.h>
 #include "RapidRLBuildConfig.h"
 #include "Utilities/utilities.h"
 #include "main_helper.h"
@@ -37,8 +38,10 @@ constexpr float kMaxHip = 5.0f;
 // 策略关节顺序中 knee/calf（膝/小腿）关节的允许目标角范围，单位 rad。
 constexpr float kMinKnee = -3.0f;
 constexpr float kMaxKnee = 3.0f;
-// 机身 roll 或 pitch 超过 30 度即急停；yaw 不参与该安全判断。
-constexpr float kMaxRollPitchRad = 30.0f * static_cast<float>(M_PI) / 180.0f;
+// 机身 roll 或 pitch 超过 45 度即急停；yaw 不参与该安全判断。
+constexpr float kMaxRollPitchDeg = 45.0f;
+constexpr float kMaxRollPitchRad =
+    kMaxRollPitchDeg * static_cast<float>(M_PI) / 180.0f;
 
 // 返回不受系统时间调整影响的单调微秒时间，供策略节拍和超时判断共用。
 int64_t monotonicTimeUs() {
@@ -133,6 +136,16 @@ template <typename T>
 FSM_State_RLJointPD<T>::~FSM_State_RLJointPD() {}
 
 template <typename T>
+void FSM_State_RLJointPD<T>::requestEmergencyStop() {
+  _emergencyStop = true;
+  // Stop this control cycle before RobotRunner reads RC OFF on the next one.
+  this->_data->_legController->setEnabled(false);
+  request_rc_off();
+  // Also leave RL when RC input is disabled (e.g. simulator GUI control).
+  this->_data->controlParameters->control_mode = K_PASSIVE;
+}
+
+template <typename T>
 void FSM_State_RLJointPD<T>::onEnter() {
   std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
             << std::endl;
@@ -164,7 +177,7 @@ void FSM_State_RLJointPD<T>::onEnter() {
   if (!_policyReady) {
     std::cout << "[LeggedGymRL] ONNX Runtime policy is not ready; refusing RL control"
               << std::endl;
-    _emergencyStop = true;
+    requestEmergencyStop();
   }
 }
 
@@ -174,10 +187,17 @@ void FSM_State_RLJointPD<T>::run() {
 
   if (isOrientationUnsafe()) {
     if (!_emergencyStop) {
+      const auto& rpy = this->_data->_stateEstimator->getResult().rpy;
+      constexpr float kRadToDeg = 180.0f / static_cast<float>(M_PI);
       std::cout << "[LeggedGymRL] Orientation is unsafe; disabling RL bridge"
+                << "; roll=" << rpy[0] * kRadToDeg << " deg"
+                << (std::fabs(rpy[0]) > kMaxRollPitchRad ? " [EXCEEDED]" : "")
+                << ", pitch=" << rpy[1] * kRadToDeg << " deg"
+                << (std::fabs(rpy[1]) > kMaxRollPitchRad ? " [EXCEEDED]" : "")
+                << ", limit=+/-" << kMaxRollPitchDeg << " deg"
                 << std::endl;
     }
-    _emergencyStop = true;
+    requestEmergencyStop();
   }
 
   if (rapid_rl::build_config::kDebugLcmState &&
@@ -338,7 +358,7 @@ bool FSM_State_RLJointPD<T>::runOnnxPolicy(int64_t now_us) {
   if (!_onnxRunner || !_onnxRunner->ready()) {
     std::cout << "[LeggedGymRL] ONNX Runtime policy is not ready; disabling RL"
               << std::endl;
-    _emergencyStop = true;
+    requestEmergencyStop();
     return false;
   }
 
@@ -358,7 +378,7 @@ bool FSM_State_RLJointPD<T>::runOnnxPolicy(int64_t now_us) {
           &inference_time_ms, &error)) {
     std::cout << "[LeggedGymRL] ONNX Runtime inference failed: " << error
               << std::endl;
-    _emergencyStop = true;
+    requestEmergencyStop();
     return false;
   }
 
@@ -374,7 +394,7 @@ bool FSM_State_RLJointPD<T>::runOnnxPolicy(int64_t now_us) {
   if (shouldHardStopForInference(inference_time_ms)) {
     std::cout << "[LeggedGymRL] ONNX Runtime inference exceeded hard timeout: "
               << inference_time_ms << " ms" << std::endl;
-    _emergencyStop = true;
+    requestEmergencyStop();
     return false;
   }
   if (inference_time_ms > rapid_rl::build_config::kMaxInferenceMs &&
@@ -395,7 +415,7 @@ bool FSM_State_RLJointPD<T>::acceptPolicyOutput(
     std::cout << "[LeggedGymRL] Rejecting policy output: " << reason
               << std::endl;
     if (stop_on_reject) {
-      _emergencyStop = true;
+      requestEmergencyStop();
     }
     return false;
   };

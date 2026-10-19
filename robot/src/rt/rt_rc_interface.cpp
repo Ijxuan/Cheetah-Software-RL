@@ -1,4 +1,4 @@
-#include <pthread.h>
+#include <mutex>
 #include <rt/rt_rc_interface.h>
 #include "Utilities/EdgeTrigger.h"
 #include <string.h> // memcpy
@@ -6,9 +6,7 @@
 #include <rt/rt_sbus.h>
 #include <algorithm>
 #include <cmath>
-static pthread_mutex_t lcm_get_set_mutex =
-    PTHREAD_MUTEX_INITIALIZER; /**< mutex to protect gui settings coming over
-                             LCM */
+static std::mutex lcm_get_set_mutex;
 
 // Controller Settings
 rc_control_settings rc_control;
@@ -20,9 +18,14 @@ float cmd_vel_wz = 0.f;
 // Controller Settings
 void get_rc_control_settings(void *settings)
 {
-    pthread_mutex_lock(&lcm_get_set_mutex);
+    std::lock_guard<std::mutex> lock(lcm_get_set_mutex);
     v_memcpy(settings, &rc_control, sizeof(rc_control_settings));
-    pthread_mutex_unlock(&lcm_get_set_mutex);
+}
+
+void request_rc_off()
+{
+    std::lock_guard<std::mutex> lock(lcm_get_set_mutex);
+    rc_control.mode = RC_mode::OFF;
 }
 
 // void get_rc_channels(void *settings) {
@@ -272,6 +275,8 @@ void js_complete(int port)
     if (len < 0)
         return;
 
+    std::lock_guard<std::mutex> lock(lcm_get_set_mutex);
+
     if (++js_print_count >= 100)
     {
         js_print_count = 0;
@@ -417,6 +422,8 @@ void sbus_packet_complete()
 {
     Taranis_X7_data data;
     update_taranis_x7(&data);
+
+    std::lock_guard<std::mutex> lock(lcm_get_set_mutex);
 
     float v_scale = data.knobs[0] * 1.5f + 2.0f; // from 0.5 to 3.5
     float w_scale = 2. * v_scale;                // from 1.0 to 7.0
