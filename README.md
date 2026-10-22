@@ -186,10 +186,34 @@ ldd .deps/onnxruntime/lib/libonnxruntime.so
 
 ### 配置、编译与验证
 
-项目内安装完成后，CMake 会自动发现 `.deps/onnxruntime`：
+以下命令均从仓库根目录执行。项目内安装完成后，CMake 会自动发现
+`.deps/onnxruntime`。`NO_SIM` 表示“不编译模拟器”，因此开启 sim 用 `OFF`，
+关闭 sim 用 `ON`。
+
+**开启 sim（编译控制器和模拟器）：**
+
+```bash
+cmake -S . -B build-onnx -DNO_SIM=OFF
+cmake --build build-onnx --target mit_ctrl sim -j4
+```
+
+生成 `build-onnx/user/MIT_Controller/mit_ctrl` 和 `build-onnx/sim/sim`。
+模拟器额外需要 Qt5（Core、Widgets、Gui、Gamepad）和 OpenGL 开发库。
+
+**关闭 sim（只编译控制器）：**
 
 ```bash
 cmake -S . -B build-onnx -DNO_SIM=ON
+cmake --build build-onnx --target mit_ctrl -j4
+```
+
+两种配置可以复用同一个 `build-onnx` 目录；切换时先重新执行对应的
+`cmake -S ...` 配置命令，再编译。关闭 sim 后，之前生成的 `build-onnx/sim/sim`
+可能仍保留在磁盘上，但不会继续参与构建。
+
+需要运行离线验证时，再编译测试和基准目标：
+
+```bash
 cmake --build build-onnx \
   --target mit_ctrl rapid_rl_policy_benchmark rapid_rl_policy_config_test -j4
 ctest --test-dir build-onnx -R 'legged_gym_rl_policy_config|himloco_onnx_policy_inference' --output-on-failure

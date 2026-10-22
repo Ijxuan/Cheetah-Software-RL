@@ -27,8 +27,10 @@ constexpr int64_t kPolicyTimeoutUs = 100000;
 constexpr int64_t kPolicyWarningPeriodUs = 500000;
 // 相邻两次策略输出对应的关节目标最多变化 0.80 rad，只做限幅而不急停。
 constexpr float kMaxTargetDeltaPerPolicyStep = 0.80f;
-// 新目标与当前实测关节角相差超过 1.20 rad 时拒绝该目标并急停。
+// 新目标与实测角偏差超过 1.20 rad 时仅统计并告警，不裁剪偏差或急停。
 constexpr float kMaxTargetCurrentError = 1.20f;
+// 每个关节恢复正常时汇报连续超限段；持续超限每 50 个策略帧汇报一次。
+constexpr uint64_t kTargetErrorReportFrames = 50;
 // 策略关节顺序中 abad（外展）关节的允许目标角范围，单位 rad。
 constexpr float kMinAbad = -1.5f;
 constexpr float kMaxAbad = 1.5f;
@@ -160,6 +162,8 @@ void FSM_State_RLJointPD<T>::onEnter() {
   _lastStatePublishTimeUs = 0;
   _lastPolicyRunTimeUs = 0;
   _lastPolicyWarningTimeUs = 0;
+  _targetErrorCounts.fill(0);
+  _targetErrorPeaks.fill(0.0f);
   _lastActionPolicy.setZero();
   _lastTargetQRobot = readRobotQ();
   if (!_lastTargetQRobot.allFinite() || _lastTargetQRobot.norm() < 1e-4f) {
@@ -424,21 +428,46 @@ bool FSM_State_RLJointPD<T>::acceptPolicyOutput(
     return reject("non-finite action or target");
   }
 
+  Vec12f clamped_target_policy = target_policy;
   for (int i = 0; i < rapid_rl::kActionDim; ++i) {
-    if (target_policy[i] < jointLowerLimit(i) ||
-        target_policy[i] > jointUpperLimit(i)) {
-      return reject("target outside joint limits at index " +
-                    std::to_string(i) + ": " +
-                    std::to_string(target_policy[i]));
+    const float lower = jointLowerLimit(i);
+    const float upper = jointUpperLimit(i);
+    if (target_policy[i] < lower || target_policy[i] > upper) {
+      clamped_target_policy[i] =
+          std::max(lower, std::min(upper, target_policy[i]));
+      std::cout << "[LeggedGymRL] WARNING: target outside joint limits at policy index "
+                << i << ": target=" << target_policy[i]
+                << " rad, limits=[" << lower << ", " << upper
+                << "] rad, clamped=" << clamped_target_policy[i]
+                << " rad; should be disable" << std::endl;
     }
   }
 
-  const Vec12f target_robot = rapid_rl::PolicyToRobotOrder(target_policy);
+  const Vec12f target_robot =
+      rapid_rl::PolicyToRobotOrder(clamped_target_policy);
   const Vec12f current_robot = readRobotQ();
   for (int i = 0; i < rapid_rl::kActionDim; ++i) {
-    if (std::fabs(target_robot[i] - current_robot[i]) >
-        kMaxTargetCurrentError) {
-      return reject("target too far from current joint " + std::to_string(i));
+    const float error = std::fabs(target_robot[i] - current_robot[i]);
+    const bool exceeded = error > kMaxTargetCurrentError;
+    if (exceeded) {
+      ++_targetErrorCounts[i];
+      _targetErrorPeaks[i] = std::max(_targetErrorPeaks[i], error);
+    }
+    if (_targetErrorCounts[i] > 0 &&
+        (!exceeded || _targetErrorCounts[i] % kTargetErrorReportFrames == 0)) {
+      std::cout << "[LeggedGymRL] WARNING: target too far from current joint "
+                << i << ": status=" << (exceeded ? "ongoing" : "recovered")
+                << ", consecutive_frames=" << _targetErrorCounts[i]
+                << ", peak_error=" << _targetErrorPeaks[i]
+                << " rad, target=" << target_robot[i]
+                << " rad, current=" << current_robot[i]
+                << " rad, abs_error=" << error
+                << " rad, limit=" << kMaxTargetCurrentError
+                << " rad; should be disable (warning only)" << std::endl;
+    }
+    if (!exceeded) {
+      _targetErrorCounts[i] = 0;
+      _targetErrorPeaks[i] = 0.0f;
     }
   }
 

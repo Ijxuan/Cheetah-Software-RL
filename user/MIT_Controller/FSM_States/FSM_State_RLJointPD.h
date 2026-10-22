@@ -1,6 +1,7 @@
 #ifndef FSM_STATE_RLJOINTPD_H
 #define FSM_STATE_RLJOINTPD_H
 
+#include <array>
 #include <memory>
 
 #include <lcm-cpp.hpp>
@@ -57,6 +58,9 @@ class FSM_State_RLJointPD : public FSM_State<T> {
   int64_t _lastStatePublishTimeUs = 0;
   int64_t _lastPolicyRunTimeUs = 0;
   int64_t _lastPolicyWarningTimeUs = 0;
+  // Per-joint consecutive policy frames and peak error in the current streak.
+  std::array<uint64_t, rapid_rl::kActionDim> _targetErrorCounts{};
+  std::array<float, rapid_rl::kActionDim> _targetErrorPeaks{};
 
   Vec12f _lastActionPolicy;
   Vec12f _lastTargetQRobot;
