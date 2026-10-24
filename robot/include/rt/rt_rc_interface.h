@@ -18,9 +18,8 @@ class rc_control_settings {
     double     step_height;
 };
 
-// Latest cmd_vel values from LCM.
-extern float cmd_vel_vx;
-extern float cmd_vel_wz;
+// Thread-safe navigation input; only accepted after RB arms RL navigation.
+void set_cmd_vel_command(double vx, double wz);
 
 
 namespace RC_mode{

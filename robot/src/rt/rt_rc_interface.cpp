@@ -1,4 +1,5 @@
 #include <mutex>
+#include <rt/NavigationCommand.h>
 #include <rt/rt_rc_interface.h>
 #include "Utilities/EdgeTrigger.h"
 #include <string.h> // memcpy
@@ -10,8 +11,20 @@ static std::mutex lcm_get_set_mutex;
 
 // Controller Settings
 rc_control_settings rc_control;
-float cmd_vel_vx = 0.f;
-float cmd_vel_wz = 0.f;
+static NavigationCommand navigation;
+
+static double navigation_time()
+{
+    return std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void set_cmd_vel_command(double vx, double wz)
+{
+    std::lock_guard<std::mutex> lock(lcm_get_set_mutex);
+    if (rc_control.mode == RC_mode::RL_JOINT_PD)
+        navigation.receive(vx, wz, navigation_time());
+}
 
 /* ------------------------- HANDLERS ------------------------- */
 
@@ -19,13 +32,34 @@ float cmd_vel_wz = 0.f;
 void get_rc_control_settings(void *settings)
 {
     std::lock_guard<std::mutex> lock(lcm_get_set_mutex);
-    v_memcpy(settings, &rc_control, sizeof(rc_control_settings));
+    if (rc_control.mode != RC_mode::RL_JOINT_PD) navigation.cancel();
+    auto snapshot = rc_control;
+    double vx = 0., wz = 0.;
+    if (navigation.sample(navigation_time(), &vx, &wz)) {
+        snapshot.v_des[0] = vx;
+        snapshot.v_des[1] = snapshot.v_des[2] = 0.;
+        snapshot.omega_des[0] = snapshot.omega_des[1] = 0.;
+        snapshot.omega_des[2] = wz;
+    }
+    static NavigationCommand::State reported = NavigationCommand::State::Manual;
+    if (reported != navigation.state()) {
+        reported = navigation.state();
+        const char* names[] = {"manual", "waiting for new command", "active",
+                               "stale: zero velocity", "timeout: zero velocity; RB re-arm or RT manual"};
+        printf("[Navigation] %s\n", names[static_cast<int>(reported)]);
+    }
+    v_memcpy(settings, &snapshot, sizeof(rc_control_settings));
 }
 
 void request_rc_off()
 {
     std::lock_guard<std::mutex> lock(lcm_get_set_mutex);
     rc_control.mode = RC_mode::OFF;
+    navigation.cancel();
+    for (int i = 0; i < 3; ++i) {
+        rc_control.v_des[i] = 0.;
+        rc_control.omega_des[i] = 0.;
+    }
 }
 
 // void get_rc_channels(void *settings) {
@@ -254,7 +288,6 @@ int js_gait = 3;
 int yaw_times = 0;
 int back_time = 0;
 int advance_or_retreat = 1;
-int remote_control = false;
 int js_print_count = 0;
 
 template <typename T>
@@ -313,94 +346,16 @@ void js_complete(int port)
         rc_control.omega_des[1] = 0;
         rc_control.omega_des[2] = 0;
     }
-    if (rc_control.mode == RC_mode::RL_JOINT_PD)
-    {
-
-
-
-        if (remote_control == false)
-        {
-        rc_control.v_des[0] = -1.0* (float)map.ly / 32768; // 应该是前后速度
-        rc_control.v_des[1] = -0.5 * (float)map.lx / 32768; // 应该 是左右速度
-        rc_control.v_des[2] = 0;
-        rc_control.omega_des[0] = 0;
-        rc_control.omega_des[1] = 0; // pitch，俯仰角度
-        rc_control.omega_des[2] =  -1.0 *(float)map.rx / 32768;  // yaw *3.0旋转角度
-        }
-        else
-        {
-        rc_control.v_des[0] = cmd_vel_vx; // 来自cmd_vel
-        rc_control.v_des[1] = 0; // 应该 是左右速度
-        rc_control.v_des[2] = 0;
-        rc_control.omega_des[0] = 0;
-        rc_control.omega_des[1] = 0; // pitch，俯仰角度
-        rc_control.omega_des[2] = cmd_vel_wz;  // 来自cmd_vel
-        }
-
-    // if (rc_control.mode == RC_mode::LOCOMOTION)
-    // { // 如果是运动模式
-    //     if (map.y)
-    //         js_gait = 9;
-    //     else if (map.x)
-    //         js_gait = 3;
-    //     else if (map.a)
-    //         js_gait = 2;
-    //     else if (map.b)
-    //         js_gait = 1; // 按下xyab调整步态模式
-    //     rc_control.variable[0] = js_gait;
-    //     rc_control.v_des[2] = 0;
-    //     rc_control.omega_des[0] = 0;
-    //     rc_control.rpy_des[0] = 0;
-
-    //     if (remote_control == false)
-    //     {
-    //         rc_control.v_des[0] = -1.0 * (float)map.ly / 32768; // 应该是前后速度
-    //         rc_control.v_des[1] = -1.0 * (float)map.lx / 32768; // 应该 是左右速度
-    //         rc_control.omega_des[1] = -(float)map.ry / 32768;   // pitch，俯仰角度
-    //         rc_control.omega_des[2] = (float)map.rx / 32768;    // yaw *3.0旋转角度
-    //     }
-    //     else
-    //     {
-    //         // rc_control.v_des[0] = -1.0 * (float)joy_new.left_y / 32768; // 应该是前后速度
-    //         // rc_control.v_des[1] = -1.0 * (float)joy_new.left_x / 32768; // 应该 是左右速度
-    //         // rc_control.omega_des[2] = (float)joy_new.right_x / 32768;   // yaw *3.0旋转角度
-
-    //         // rc_control.v_des[0] = clamp( -1.0 * (double)joy_new.left_y / 32768  , -1.0, 1.0);                            // val = 100
-    //         // rc_control.v_des[1] = clamp( -1.0 * (double)joy_new.left_x / 32768 , -1.0, 1.0);                            // val = 100
-    //         // rc_control.omega_des[2]= clamp( (double)joy_new.right_x / 32768  , -0.3, 0.3);                            // val = 100
-    //     }
-
-    //     if (map.lb)
-    //     {
-    //         if (map.yy < -30000)
-    //             rc_control.step_height = 0.8; // LB加十字键上下是调整步态抬腿高低
-    //         else if (map.yy > 30000)
-    //             rc_control.step_height = 0.3;
-    //     }
-    //     else
-    //     {
-    //         if (map.yy > 30000)
-    //             rc_control.height_variation = -0.6; // 十字键上下是调整机体高低
-    //         else if (map.yy < -30000)
-    //             rc_control.height_variation = 0;
-    //     }
-    // }
-    // else
-    // {
-    //     remote_control = false; // 不是运动模式，默认不开启远程控制
-    // }
-    // printf("map.rb is %d\n",map.rb);//十字键左右是远程控制开关
-    // if ((map.rb)==true&& remote_control = false)
-    if (map.rb)
-    {
-        remote_control = true;
-        printf("rb is down  remote_control open\n"); //
-    }
-    if (map.rt > 15000)
-    {
-        remote_control = false;
-        printf("map.rt is  %d  remote_control close\n", map.rt); //
-    }
+    navigation.buttons(rc_control.mode == RC_mode::RL_JOINT_PD,
+                       map.rb, map.rt > 15000, navigation_time());
+    if (rc_control.mode == RC_mode::RL_JOINT_PD) {
+        // Always refresh manual input. Navigation overrides only the snapshot,
+        // so RT takes effect on this event without retaining a navigation speed.
+        rc_control.v_des[0] = -(double)map.ly / 32768;
+        rc_control.v_des[1] = -0.5 * (double)map.lx / 32768;
+        rc_control.v_des[2] = 0.;
+        rc_control.omega_des[0] = rc_control.omega_des[1] = 0.;
+        rc_control.omega_des[2] = -(double)map.rx / 32768;
     }
 }
 
@@ -474,6 +429,7 @@ void sbus_packet_complete()
         }
         rc_control.mode = selected_mode;
     }
+    if (rc_control.mode != RC_mode::RL_JOINT_PD) navigation.cancel();
 }
 
 void *v_memcpy(void *dest, volatile void *src, size_t n)

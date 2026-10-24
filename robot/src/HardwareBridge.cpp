@@ -130,12 +130,7 @@ void HardwareBridge::handleCmdVelLCM(const lcm::ReceiveBuffer* rbuf,
                                      const cmd_vel_msg* msg) {
   (void)rbuf;
   (void)chan;
-  (void)msg;
-
-  cmd_vel_vx = msg->vx;
-  cmd_vel_wz = msg->wz;
-  joy_new_x = msg->vx;
-  joy_new_yaw = msg->wz;
+  set_cmd_vel_command(msg->vx, msg->wz);
   
   // printf("[HardwareBridge] cmd_vel_msg received on %s: vx=%.3f, wz=%.3f\n",
   //        chan.c_str(), msg->vx, msg->wz);

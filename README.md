@@ -374,3 +374,7 @@ ONNX Runtime 的 C++ 会话与推理接口见
 [官方 API 文档](https://onnxruntime.ai/docs/api/c/struct_ort_1_1_session.html)。
 旧 LibTorch 流程保留在 [`docs/rapid_rl_libtorch_deploy.md`](docs/rapid_rl_libtorch_deploy.md)，
 仅用于历史参考，不适用于此分支。
+
+### HIM ONNX 导航爬楼梯
+
+导航输入、RB/RT 接管、断流行为及离线测试见 [导航爬楼梯接入说明](docs/himloco_nav_stairs.md)。

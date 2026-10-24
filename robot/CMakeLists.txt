@@ -25,3 +25,8 @@ target_link_libraries(robot biomimetics pthread lcm inih dynacore_param_handler 
 if(CMAKE_SYSTEM_NAME MATCHES Linux)
 target_link_libraries(robot libvnc rt)
 endif()
+
+add_executable(navigation_command_test tests/navigation_command_test.cpp)
+target_link_libraries(navigation_command_test robot)
+add_test(NAME navigation_command COMMAND navigation_command_test)
+set_tests_properties(navigation_command PROPERTIES TIMEOUT 15)
