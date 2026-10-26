@@ -14,7 +14,7 @@
 #include "../FSM_States/FSM_State_BalanceStand.h"
 #include "../FSM_States/FSM_State_ImpedanceControl.h"
 #include "../FSM_States/FSM_State_JointPD.h"
-#include "../FSM_States/FSM_State_RLJointPD.h"
+#include "../FSM_States/FSM_State_RLPolicies.h"
 #include "../FSM_States/FSM_State_Locomotion.h"
 #include "../FSM_States/FSM_State_Passive.h"
 #include "../FSM_States/FSM_State_StandUp.h"
@@ -37,7 +37,8 @@ struct FSM_StatesList {
   FSM_State<T>* invalid;
   FSM_State_Passive<T>* passive;
   FSM_State_JointPD<T>* jointPD;
-  FSM_State_RLJointPD<T>* rlJointPD;
+  FSM_State_RLFlat<T>* rlFlat;
+  FSM_State_RLStairs<T>* rlStairs;
   FSM_State_ImpedanceControl<T>* impedanceControl;
   FSM_State_StandUp<T>* standUp;
   FSM_State_BalanceStand<T>* balanceStand;
@@ -71,6 +72,11 @@ class ControlFSM {
              VisualizationData* visualizationData,
              MIT_UserParameters* userParameters);
 
+  // Dependency-injected state registry for offline execution of the same FSM
+  // loop without constructing unrelated vision subscribers or motion loaders.
+  ControlFSM(const ControlFSMData<T>& initial_data, const FSM_StatesList<T>& states,
+             std::shared_ptr<RLControlContext<T>> context);
+
   // Initializes the Control FSM instance
   void initialize();
 
@@ -91,10 +97,11 @@ class ControlFSM {
 
   // Contains all of the control related data
   ControlFSMData<T> data;
+  std::shared_ptr<RLControlContext<T>> rlContext;
 
   // FSM state information
   FSM_StatesList<T> statesList;  // holds all of the FSM States
-  FSM_State<T>* currentState;    // current FSM state
+  FSM_State<T>* currentState = nullptr;    // current FSM state
   FSM_State<T>* nextState;       // next FSM state
   FSM_StateName nextStateName;   // next FSM state name
 

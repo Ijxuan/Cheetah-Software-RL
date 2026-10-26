@@ -6,6 +6,7 @@ namespace build_config {
 
 constexpr const char* kCheckpointDir = "@RAPID_RL_CHECKPOINT_DIR@";
 constexpr const char* kCheckpointFile = "@RAPID_RL_CHECKPOINT_FILE@";
+constexpr const char* kFlatModelDir = "@RL_FLAT_MODEL_DIR@";
 constexpr int kWarmupIters = @RAPID_RL_WARMUP_ITERS@;
 constexpr float kMaxInferenceMs =
     static_cast<float>(@RAPID_RL_MAX_INFERENCE_MS@);

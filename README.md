@@ -4,17 +4,23 @@
 控制器开发。原始工程的构建、仿真和硬件说明可参考
 [MIT Cheetah-Software](https://github.com/mit-biomimetics/Cheetah-Software)。
 
-当前 `RL_JOINT_PD` 使用 C++ 控制进程内的 CPU ONNX Runtime 推理，直接加载一个
-由 `legged_gym` 导出的确定性 Actor。其他 FSM 状态、模式切换和硬件控制链路
-保持原样。`RL_JOINT_PD` 对应的控制模式常量为 `K_RL_JOINT_PD=53`。
+当前上层 FSM 包含两个独立状态：旧平地 MLP `RL_FLAT=54` 和 HIM ONNX
+楼梯 `RL_STAIRS=53`（兼容原 `RL_JOINT_PD=53`）。LT+A 起立后，Start 请求
+平地状态、Back 请求楼梯状态；切换时先停稳再过渡，
+保留导航控制权。LT+X 恢复站立，LT+B 失能。两套历史持续更新，各自保持观测和
+动作定义。操作、切换条件和双策略离线测试见 [导航与双控制器说明](docs/himloco_nav_stairs.md)。
 
 ## 当前策略文件
 
-运行时只加载：
+楼梯策略加载：
 
 ```text
 rl-checkpoints/onnx/policy.onnx
 ```
+
+平地策略另外加载 `actor_model/{actor_5000.txt,estimator_5000.txt,mean5000.csv,var5000.csv}`。
+可用 CMake `-DRL_FLAT_MODEL_DIR=/absolute/path/to/actor_model` 指定部署目录。
+两套模型都在进程初始化时加载；部署时需要同时携带这些文件。
 
 当前文件的导出说明标注来源为
 `rough_minich/Oct12_09-14-06_smoke_minich/model_1000.pt`。

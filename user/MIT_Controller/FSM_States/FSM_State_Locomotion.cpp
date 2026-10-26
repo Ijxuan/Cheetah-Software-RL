@@ -121,8 +121,13 @@ FSM_StateName FSM_State_Locomotion<T>::checkTransition() {
         this->transitionDuration = 0.;
         break;
 
-      case K_RL_JOINT_PD:
-        this->nextStateName = FSM_StateName::RL_JOINT_PD;
+      case K_RL_FLAT:
+        this->nextStateName = FSM_StateName::RL_FLAT;
+        this->transitionDuration = 0.0;
+        break;
+
+      case K_RL_STAIRS:
+        this->nextStateName = FSM_StateName::RL_STAIRS;
         // Transition time is immediate
         this->transitionDuration = 0.0;
         break;
@@ -184,7 +189,8 @@ TransitionData<T> FSM_State_Locomotion<T>::transition() {
       this->transitionData.done = true;
       break;
 
-    case FSM_StateName::RL_JOINT_PD:
+    case FSM_StateName::RL_FLAT:
+    case FSM_StateName::RL_STAIRS:
       this->transitionData.done = true;
       break;
 

@@ -116,6 +116,7 @@ bool OnnxPolicyRunner::load() {
 
 void OnnxPolicyRunner::resetObservationHistory() {
   observation_history_.setZero();
+  history_frames_ = 0;
 }
 
 void OnnxPolicyRunner::resetTiming() {
@@ -180,6 +181,47 @@ bool OnnxPolicyRunner::infer(const Vec3f& base_angular_velocity,
                                  Vec12f* target_q,
                                  float* inference_time_ms,
                                  std::string* error) {
+  if (inference_time_ms) *inference_time_ms = 0.f;
+  // Failed calls must not advance history. Standby history preparation uses
+  // observe() explicitly and is allowed before a model is ready.
+  if (!ready_ || !action || !target_q)
+    return inferFromHistory(action, target_q, inference_time_ms, error);
+  if (!observe(base_angular_velocity, projected_gravity, command, q_policy,
+               qd_policy, last_action, error)) return false;
+  return inferFromHistory(action, target_q, inference_time_ms, error);
+}
+
+bool OnnxPolicyRunner::observe(const Vec3f& base_angular_velocity,
+                               const Vec3f& projected_gravity,
+                               const Vec3f& command, const Vec12f& q_policy,
+                               const Vec12f& qd_policy, const Vec12f& last_action,
+                               std::string* error) {
+  if (error) error->clear();
+  if (!base_angular_velocity.allFinite() ||
+      !projected_gravity.allFinite() || !command.allFinite() ||
+      !q_policy.allFinite() || !qd_policy.allFinite() ||
+      !last_action.allFinite()) {
+    if (error) {
+      *error = "policy input contains non-finite values";
+    }
+    return false;
+  }
+
+  const auto current = BuildOneStepObservationPolicyOrder(
+      base_angular_velocity, projected_gravity, command, q_policy, qd_policy, last_action);
+  if (!current.allFinite()) {
+    if (error) *error = "policy observation contains non-finite values";
+    return false;
+  }
+  observation_history_.template tail<kObsDim - kOneStepObsDim>() =
+      observation_history_.template head<kObsDim - kOneStepObsDim>().eval();
+  observation_history_.template head<kOneStepObsDim>() = current;
+  if (history_frames_ < kHistorySteps) ++history_frames_;
+  return true;
+}
+
+bool OnnxPolicyRunner::inferFromHistory(Vec12f* action, Vec12f* target_q,
+                                       float* inference_time_ms, std::string* error) {
   if (error) {
     error->clear();
   }
@@ -198,37 +240,8 @@ bool OnnxPolicyRunner::infer(const Vec3f& base_angular_velocity,
     }
     return false;
   }
-  if (!base_angular_velocity.allFinite() ||
-      !projected_gravity.allFinite() || !command.allFinite() ||
-      !q_policy.allFinite() || !qd_policy.allFinite() ||
-      !last_action.allFinite()) {
-    if (error) {
-      *error = "policy input contains non-finite values";
-    }
-    return false;
-  }
-
   try {
     const auto start = std::chrono::steady_clock::now();
-    const Eigen::Matrix<float, kOneStepObsDim, 1> current_obs =
-        BuildOneStepObservationPolicyOrder(
-            base_angular_velocity, projected_gravity, command, q_policy,
-            qd_policy, last_action);
-    if (!current_obs.allFinite()) {
-      if (error) {
-        *error = "policy observation contains non-finite values";
-      }
-      return false;
-    }
-
-    // Training prepends the newest 45-D frame and shifts older frames right:
-    // [t, t-1, t-2, t-3, t-4, t-5].
-    observation_history_.template tail<kObsDim - kOneStepObsDim>() =
-        observation_history_
-            .template head<kObsDim - kOneStepObsDim>()
-            .eval();
-    observation_history_.template head<kOneStepObsDim>() = current_obs;
-
     if (!runPolicy(action, error)) return false;
     *action = ClipPolicyAction(*action);
     *target_q = ActionToTargetQPolicyOrder(*action);

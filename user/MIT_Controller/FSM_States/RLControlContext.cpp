@@ -1,6 +1,6 @@
 /*=================== legged_gym RL Joint PD Bridge ===================*/
 
-#include "FSM_State_RLJointPD.h"
+#include "RLControlContext.h"
 
 #include <algorithm>
 #include <cmath>
@@ -14,10 +14,6 @@
 
 namespace {
 
-// 策略以 rapid_rl::kPolicyDt 的周期运行；此处换算为单调时钟的微秒，
-// 避免策略推理受系统时间校正影响。
-constexpr int64_t kPolicyDtUs =
-    static_cast<int64_t>(rapid_rl::kPolicyDt * 1000000.0f);
 // 发布只读 RL 调试状态的周期；与策略周期保持一致。
 constexpr int64_t kStatePublishDtUs =
     static_cast<int64_t>(rapid_rl::kStatePublishDt * 1000000.0f);
@@ -44,6 +40,9 @@ constexpr float kMaxKnee = 3.0f;
 constexpr float kMaxRollPitchDeg = 45.0f;
 constexpr float kMaxRollPitchRad =
     kMaxRollPitchDeg * static_cast<float>(M_PI) / 180.0f;
+// Preserve the legacy flat policy's total body-tilt limit, including blending.
+constexpr float kMaxFlatTiltDeg = 30.f;
+constexpr float kMaxFlatTiltRad = kMaxFlatTiltDeg * static_cast<float>(M_PI) / 180.f;
 
 // 返回不受系统时间调整影响的单调微秒时间，供策略节拍和超时判断共用。
 int64_t monotonicTimeUs() {
@@ -84,11 +83,12 @@ float simulationPdGainOrFallback(double requested_gain, float fallback_gain) {
 }  // namespace
 
 template <typename T>
-FSM_State_RLJointPD<T>::FSM_State_RLJointPD(
-    ControlFSMData<T>* _controlFSMData)
-    : FSM_State<T>(_controlFSMData, FSM_StateName::RL_JOINT_PD,
-                   "RL_JOINT_PD"),
+RLControlContext<T>::RLControlContext(
+    ControlFSMData<T>* _controlFSMData, bool publish_debug_state,
+    std::function<int64_t()> clock)
+    : _data(_controlFSMData), _clock(clock ? std::move(clock) : monotonicTimeUs),
       _stateLCM(getLcmUrl(255)) {
+  _publishDebugState = publish_debug_state && rapid_rl::build_config::kDebugLcmState;
   std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
             << std::endl;
   std::cout << "Setup legged_gym ONNX Runtime Joint PD" << std::endl;
@@ -113,7 +113,7 @@ FSM_State_RLJointPD<T>::FSM_State_RLJointPD(
             << calf_gains.kp << "], Kd=[" << abad_gains.kd << ", "
             << thigh_gains.kd << ", " << calf_gains.kd << "]" << std::endl;
 
-  if (rapid_rl::build_config::kDebugLcmState && !_stateLCM.good()) {
+  if (_publishDebugState && !_stateLCM.good()) {
     std::cout << "[LeggedGymRL] WARNING: failed to initialize debug LCM"
               << std::endl;
   }
@@ -123,22 +123,29 @@ FSM_State_RLJointPD<T>::FSM_State_RLJointPD(
   if (!_policyReady) {
     std::cout << "[LeggedGymRL] ERROR: failed to load ONNX Runtime policy: "
               << _onnxRunner->error() << std::endl;
-    return;
   }
-  std::cout << "[LeggedGymRL] Loaded ONNX Runtime policy: "
-            << _onnxRunner->policyPath() << std::endl;
-  std::cout << "[LeggedGymRL] Shapes: input "
-            << _onnxRunner->inputShape() << ", action "
-            << _onnxRunner->actionShape() << std::endl;
-  std::cout << "[LeggedGymRL] ONNX Runtime CPU threads: "
-            << rapid_rl::build_config::kOnnxNumThreads << std::endl;
+  if (_policyReady) {
+    std::cout << "[LeggedGymRL] Loaded ONNX Runtime policy: "
+              << _onnxRunner->policyPath() << std::endl;
+    std::cout << "[LeggedGymRL] Shapes: input "
+              << _onnxRunner->inputShape() << ", action "
+              << _onnxRunner->actionShape() << std::endl;
+    std::cout << "[LeggedGymRL] ONNX Runtime CPU threads: "
+              << rapid_rl::build_config::kOnnxNumThreads << std::endl;
+  }
+  if (!_flatRunner.load(rapid_rl::build_config::kFlatModelDir)) {
+    std::cout << "[DualRL] Flat policy load failed: " << _flatRunner.error() << std::endl;
+  } else {
+    std::cout << "[DualRL] Loaded flat actor/estimator_5000 from "
+              << rapid_rl::build_config::kFlatModelDir << std::endl;
+  }
 }
 
 template <typename T>
-FSM_State_RLJointPD<T>::~FSM_State_RLJointPD() {}
+RLControlContext<T>::~RLControlContext() {}
 
 template <typename T>
-void FSM_State_RLJointPD<T>::requestEmergencyStop() {
+void RLControlContext<T>::requestEmergencyStop() {
   _emergencyStop = true;
   // Stop this control cycle before RobotRunner reads RC OFF on the next one.
   this->_data->_legController->setEnabled(false);
@@ -148,19 +155,47 @@ void FSM_State_RLJointPD<T>::requestEmergencyStop() {
 }
 
 template <typename T>
-void FSM_State_RLJointPD<T>::onEnter() {
+void RLControlContext<T>::enter(RLController controller) {
+  const int64_t now_us = nowUs();
+  if (_sessionActive) {
+    if (!transferReady(controller)) {
+      std::cout << "[DualRL] Invalid FSM handover; requesting OFF" << std::endl;
+      requestEmergencyStop();
+      return;
+    }
+    _blendOrigin = _lastTargetQRobot;
+    _blendFrom = _switch.active();
+    _blendTargetReached = false;
+    _switch.activate(controller, now_us);
+    _targetErrorCounts.fill(0);
+    _targetErrorPeaks.fill(0.f);
+    if (controller == RLController::Stairs) {
+      Vec4<float> phase = Vec4<float>::Constant(.5f);
+      _data->_stateEstimator->setContactPhase(phase);
+    }
+    holdTarget();
+    reportSwitch();
+    return;
+  }
+  _sessionActive = true;
   std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
             << std::endl;
   std::cout << "Start legged_gym ONNX Runtime Joint PD" << std::endl;
   std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
             << std::endl;
 
-  this->nextStateName = this->stateName;
-  this->transitionData.zero();
-
   _stateSequence = 0;
   _lastStatePublishTimeUs = 0;
   _lastPolicyRunTimeUs = 0;
+  _lastHistoryTimeUs = _lastStairsHistoryTimeUs = 0;
+  _historyTick = 0;
+  _flatHistory.reset();
+  const auto* rc = this->_data->_desiredStateCommand->rcCommand;
+  const bool use_rc = this->_data->controlParameters->use_rc;
+  _switch.reset(controller, use_rc ? rc->rl_selection_sequence : 0, now_us);
+  _controlTimeUs = now_us;
+  _reportedPhase = RLPolicySwitch::Phase::Blocked;
+  _blendTargetReached = false;
   _lastPolicyWarningTimeUs = 0;
   _targetErrorCounts.fill(0);
   _targetErrorPeaks.fill(0.0f);
@@ -178,16 +213,21 @@ void FSM_State_RLJointPD<T>::onEnter() {
   }
 
   _emergencyStop = false;
-  if (!_policyReady) {
-    std::cout << "[LeggedGymRL] ONNX Runtime policy is not ready; refusing RL control"
+  if (!controllerReady(_switch.active())) {
+    std::cout << "[DualRL] Selected policy is not ready; refusing RL control"
               << std::endl;
     requestEmergencyStop();
   }
+  holdTarget();
 }
 
 template <typename T>
-void FSM_State_RLJointPD<T>::run() {
-  const int64_t now_us = monotonicTimeUs();
+void RLControlContext<T>::runAtTime(RLController owner, int64_t now_us) {
+  if (!_sessionActive || owner != _switch.active()) {
+    requestEmergencyStop();
+    return;
+  }
+  _controlTimeUs = now_us;
 
   if (isOrientationUnsafe()) {
     if (!_emergencyStop) {
@@ -198,16 +238,17 @@ void FSM_State_RLJointPD<T>::run() {
                 << (std::fabs(rpy[0]) > kMaxRollPitchRad ? " [EXCEEDED]" : "")
                 << ", pitch=" << rpy[1] * kRadToDeg << " deg"
                 << (std::fabs(rpy[1]) > kMaxRollPitchRad ? " [EXCEEDED]" : "")
-                << ", limit=+/-" << kMaxRollPitchDeg << " deg"
-                << std::endl;
+                << ", limit=+/-" << kMaxRollPitchDeg << " deg";
+      if (usesFlatSafety()) {
+        const float cos_tilt = this->_data->_stateEstimator->getResult().rBody(2, 2);
+        const float tilt = std::acos(std::max(-1.f, std::min(1.f, cos_tilt)));
+        std::cout << ", flat_tilt=" << tilt * kRadToDeg << " deg"
+                  << ", flat_tilt_limit=" << kMaxFlatTiltDeg << " deg"
+                  << (tilt > kMaxFlatTiltRad ? " [EXCEEDED]" : "");
+      }
+      std::cout << std::endl;
     }
     requestEmergencyStop();
-  }
-
-  if (rapid_rl::build_config::kDebugLcmState &&
-      now_us - _lastStatePublishTimeUs >= kStatePublishDtUs) {
-    publishRobotState(now_us);
-    _lastStatePublishTimeUs = now_us;
   }
 
   if (_emergencyStop) {
@@ -215,81 +256,158 @@ void FSM_State_RLJointPD<T>::run() {
     return;
   }
 
-  if (now_us - _lastPolicyRunTimeUs >= kPolicyDtUs) {
-    runOnnxPolicy(now_us);
-    _lastPolicyRunTimeUs = now_us;
+  const bool sample_due = now_us - _lastHistoryTimeUs >= 10000;
+  if (sample_due && !updateHistories(now_us)) {
+    requestEmergencyStop();
+    return;
   }
+  _switch.tick(now_us, stationaryFor(_switch.requested()),
+               _flatHistory.ready() && _onnxRunner->historyReady());
+  // A prepared observation was recorded with zero command this cycle. Keep it
+  // until the next policy frame, then resume the newest live RC/nav command.
+  if (sample_due && _switch.phase() != RLPolicySwitch::Phase::Preparing &&
+      (_switch.active() == RLController::Flat ? _flatHistory.ready() : _onnxRunner->historyReady()) &&
+      (owner == RLController::Flat || _stairsObservationDue)) {
+    if (owner == RLController::Flat) runFlatPolicy(now_us);
+    else runOnnxPolicy(now_us);
+    _lastPolicyRunTimeUs = now_us;
+    if (!_emergencyStop) _switch.finishBlend(now_us, _blendTargetReached);
+  }
+  reportSwitch();
   if (_emergencyStop) {
     this->_data->_legController->setEnabled(false);
     return;
   }
   commandTarget(_lastTargetQRobot);
-}
-
-template <typename T>
-FSM_StateName FSM_State_RLJointPD<T>::checkTransition() {
-  this->nextStateName = this->stateName;
-
-  switch (static_cast<int>(this->_data->controlParameters->control_mode)) {
-    case K_RL_JOINT_PD:
-      break;
-
-    case K_JOINT_PD:
-      this->nextStateName = FSM_StateName::JOINT_PD;
-      break;
-
-    case K_IMPEDANCE_CONTROL:
-      this->nextStateName = FSM_StateName::IMPEDANCE_CONTROL;
-      this->transitionDuration = 1.0;
-      break;
-
-    case K_STAND_UP:
-      this->nextStateName = FSM_StateName::STAND_UP;
-      this->transitionDuration = 0.0;
-      break;
-
-    case K_PASSIVE:
-      this->nextStateName = FSM_StateName::PASSIVE;
-      this->transitionDuration = 0.0;
-      break;
-
-    case K_RECOVERY_STAND:
-      this->nextStateName = FSM_StateName::RECOVERY_STAND;
-      this->transitionDuration = 0.0;
-      break;
-
-    case K_BALANCE_STAND:
-      this->nextStateName = FSM_StateName::BALANCE_STAND;
-      this->transitionDuration = 0.0;
-      break;
-
-    case K_LOCOMOTION:
-      this->nextStateName = FSM_StateName::LOCOMOTION;
-      this->transitionDuration = 0.0;
-      break;
-
-    default:
-      std::cout << "[LeggedGymRL] Bad transition request from " << K_RL_JOINT_PD
-                << " to " << this->_data->controlParameters->control_mode
-                << std::endl;
+  if (_publishDebugState &&
+      now_us - _lastStatePublishTimeUs >= kStatePublishDtUs) {
+    publishRobotState(now_us);
+    _lastStatePublishTimeUs = now_us;
   }
+}
 
-  return this->nextStateName;
+// The RobotRunner already ran the state estimator once. Neither policy runs it
+// again; the legacy contact hint is applied for the next estimator cycle only.
+template <typename T>
+bool RLControlContext<T>::updateHistories(int64_t now_us) {
+  rapid_rl::RLStateSample sample;
+  const auto& estimate = this->_data->_stateEstimator->getResult();
+  sample.time_us = now_us;
+  sample.r_body = estimate.rBody;
+  sample.omega = estimate.omegaBody;
+  sample.q = readRobotQ();
+  sample.qd = readRobotQd();
+  sample.applied_target = _lastTargetQRobot;
+  sample.command = readVelocityCommand();
+  for (int leg = 0; leg < 4; ++leg) {
+    sample.feet.segment<3>(leg * 3) = this->_data->_quadruped->getHipLocation(leg) +
+        this->_data->_legController->datas[leg].p;
+  }
+  if (!sample.finite()) {
+    std::cout << "[DualRL] Non-finite shared robot state; requesting OFF" << std::endl;
+    return false;
+  }
+  if (_lastHistoryTimeUs && now_us - _lastHistoryTimeUs > 30000) {
+    _historyTick = 0;
+    _onnxRunner->resetObservationHistory();
+  }
+  _flatHistory.append(sample);
+  _stairsObservationDue = (_historyTick++ % 2 == 0);
+  _lastHistoryTimeUs = now_us;
+  if (_stairsObservationDue) {
+    if (_lastStairsHistoryTimeUs && now_us - _lastStairsHistoryTimeUs > 60000)
+      _onnxRunner->resetObservationHistory();
+    // Preserve HIM's own raw previous action in normal HIM operation. While
+    // inactive or handing over, reconstruct from the target actually applied.
+    const Vec12f last_action = _switch.active() == RLController::Stairs &&
+        _switch.phase() != RLPolicySwitch::Phase::Preparing &&
+        _switch.phase() != RLPolicySwitch::Phase::Blending ? _lastActionPolicy :
+        rapid_rl::AppliedTargetToHimAction(sample.applied_target);
+    std::string error;
+    if (!_onnxRunner->observe(sample.omega, readProjectedGravity(), sample.command,
+          rapid_rl::RobotToPolicyOrder(sample.q), rapid_rl::RobotToPolicyOrder(sample.qd),
+          last_action, &error)) {
+      std::cout << "[DualRL] HIM observation failed: " << error << std::endl;
+      return false;
+    }
+    _lastStairsHistoryTimeUs = now_us;
+  }
+  if (_switch.active() == RLController::Flat) {
+    Vec4<float> phase;
+    for (int leg = 0; leg < 4; ++leg)
+      phase[leg] = sample.applied_target[leg * 3 + 2] - sample.q[leg * 3 + 2] < 0.f;
+    this->_data->_stateEstimator->setContactPhase(phase);
+  }
+  return true;
 }
 
 template <typename T>
-TransitionData<T> FSM_State_RLJointPD<T>::transition() {
-  this->transitionData.done = true;
-  return this->transitionData;
+bool RLControlContext<T>::controllerReady(RLController selected) const {
+  return selected == RLController::Flat ? _flatRunner.ready() :
+      selected == RLController::Stairs && _policyReady;
 }
 
 template <typename T>
-void FSM_State_RLJointPD<T>::onExit() {
+bool RLControlContext<T>::stationaryFor(RLController selected) const {
+  const auto& estimate = _data->_stateEstimator->getResult();
+  const Vec12f qd = readRobotQd();
+  return (selected != RLController::Flat || estimate.rBody(2, 2) >= std::cos(kMaxFlatTiltRad)) &&
+      estimate.vBody.allFinite() && estimate.omegaBody.allFinite() && qd.allFinite() &&
+      estimate.vBody.norm() < .05f && estimate.omegaBody.norm() < .1f &&
+      qd.cwiseAbs().maxCoeff() < .5f;
+}
+
+template <typename T>
+void RLControlContext<T>::request(RLController controller, uint64_t sequence) {
+  _switch.request(controller, sequence, nowUs(), controllerReady(controller));
+}
+
+template <typename T>
+bool RLControlContext<T>::transferReady(RLController controller) const {
+  const int64_t now = nowUs();
+  return !_emergencyStop && _sessionActive && controllerReady(controller) &&
+      _switch.phase() == RLPolicySwitch::Phase::Ready && _switch.requested() == controller &&
+      !isOrientationUnsafe() && stationaryFor(controller) &&
+      now >= _lastHistoryTimeUs && now - _lastHistoryTimeUs <= 30000 &&
+      now >= _lastStairsHistoryTimeUs && now - _lastStairsHistoryTimeUs <= 60000;
+}
+
+template <typename T>
+void RLControlContext<T>::holdTarget() {
+  _controlTimeUs = nowUs();
+  if (_emergencyStop) _data->_legController->setEnabled(false);
+  else commandTarget(_lastTargetQRobot);
+}
+
+template <typename T>
+void RLControlContext<T>::leave(bool to_rl) {
+  if (to_rl && !_emergencyStop) holdTarget();
+  else stop();
+}
+
+template <typename T>
+void RLControlContext<T>::reportSwitch() {
+  if (_reportedPhase == _switch.phase() && _reportedController == _switch.active()) return;
+  _reportedPhase = _switch.phase();
+  _reportedController = _switch.active();
+  std::cout << "[DualRL] active=" << rlControllerName(_switch.active())
+            << " requested=" << rlControllerName(_switch.requested())
+            << " state=" << RLPolicySwitch::phaseName(_switch.phase()) << std::endl;
+}
+
+template <typename T>
+void RLControlContext<T>::stop() {
+  _sessionActive = false;
   this->_data->_legController->setEnabled(false);
+  _flatHistory.reset();
+  _onnxRunner->resetObservationHistory();
+  // Do not leave the legacy flat contact hint latched after RL exit.
+  Vec4<float> phase = Vec4<float>::Constant(.5f);
+  this->_data->_stateEstimator->setContactPhase(phase);
 }
 
 template <typename T>
-void FSM_State_RLJointPD<T>::publishRobotState(int64_t now_us) {
+void RLControlContext<T>::publishRobotState(int64_t now_us) {
   if (!_stateLCM.good()) {
     return;
   }
@@ -302,7 +420,7 @@ void FSM_State_RLJointPD<T>::publishRobotState(int64_t now_us) {
   rl_robot_state_lcmt state;
   state.timestamp_us = now_us;
   state.sequence = ++_stateSequence;
-  state.mode = static_cast<int32_t>(this->_data->controlParameters->control_mode);
+  state.mode = activeMode();
 
   for (int i = 0; i < 3; ++i) {
     state.projected_gravity[i] = projected_gravity[i];
@@ -319,7 +437,7 @@ void FSM_State_RLJointPD<T>::publishRobotState(int64_t now_us) {
 }
 
 template <typename T>
-void FSM_State_RLJointPD<T>::commandTarget(const Vec12f& target_q_robot) {
+void RLControlContext<T>::commandTarget(const Vec12f& target_q_robot) {
   Mat3<float> kp = Mat3<float>::Zero();
   Mat3<float> kd = Mat3<float>::Zero();
   // 仅仿真允许 GUI 覆盖 RL 增益；实机始终保留经验证的 real-robot profile，
@@ -336,6 +454,15 @@ void FSM_State_RLJointPD<T>::commandTarget(const Vec12f& target_q_robot) {
           this->_data->userParameters->rl_kp_joint[joint], gains.kp);
       gains.kd = simulationPdGainOrFallback(
           this->_data->userParameters->rl_kd_joint[joint], gains.kd);
+    }
+    const float stairs_kp = gains.kp, stairs_kd = gains.kd;
+    if (_switch.active() == RLController::Flat) { gains.kp = 17.f; gains.kd = .4f; }
+    if (_switch.phase() == RLPolicySwitch::Phase::Blending) {
+      const float alpha = _switch.blend(_controlTimeUs);
+      const float old_kp = _blendFrom == RLController::Flat ? 17.f : stairs_kp;
+      const float old_kd = _blendFrom == RLController::Flat ? .4f : stairs_kd;
+      gains.kp = old_kp + alpha * (gains.kp - old_kp);
+      gains.kd = old_kd + alpha * (gains.kd - old_kd);
     }
     kp(joint, joint) = gains.kp;
     kd(joint, joint) = gains.kd;
@@ -358,7 +485,7 @@ void FSM_State_RLJointPD<T>::commandTarget(const Vec12f& target_q_robot) {
 }
 
 template <typename T>
-bool FSM_State_RLJointPD<T>::runOnnxPolicy(int64_t now_us) {
+bool RLControlContext<T>::runOnnxPolicy(int64_t now_us) {
   if (!_onnxRunner || !_onnxRunner->ready()) {
     std::cout << "[LeggedGymRL] ONNX Runtime policy is not ready; disabling RL"
               << std::endl;
@@ -366,19 +493,11 @@ bool FSM_State_RLJointPD<T>::runOnnxPolicy(int64_t now_us) {
     return false;
   }
 
-  const Vec12f q_policy = rapid_rl::RobotToPolicyOrder(readRobotQ());
-  const Vec12f qd_policy = rapid_rl::RobotToPolicyOrder(readRobotQd());
-  const Vec3f base_angular_velocity = readBaseAngularVelocity();
-  const Vec3f command = readVelocityCommand();
-  const Vec3f projected_gravity = readProjectedGravity();
-
   Vec12f action_policy;
   Vec12f target_policy;
   float inference_time_ms = 0.0f;
   std::string error;
-  if (!_onnxRunner->infer(
-          base_angular_velocity, projected_gravity, command, q_policy,
-          qd_policy, _lastActionPolicy, &action_policy, &target_policy,
+  if (!_onnxRunner->inferFromHistory(&action_policy, &target_policy,
           &inference_time_ms, &error)) {
     std::cout << "[LeggedGymRL] ONNX Runtime inference failed: " << error
               << std::endl;
@@ -412,7 +531,28 @@ bool FSM_State_RLJointPD<T>::runOnnxPolicy(int64_t now_us) {
 }
 
 template <typename T>
-bool FSM_State_RLJointPD<T>::acceptPolicyOutput(
+bool RLControlContext<T>::runFlatPolicy(int64_t now_us) {
+  if (!_flatHistory.ready()) return true;
+  Vec12f target_robot;
+  float elapsed_ms = 0.f;
+  std::string error;
+  if (!_flatRunner.infer(_flatHistory.observation(), &target_robot, &elapsed_ms, &error) ||
+      shouldHardStopForInference(elapsed_ms)) {
+    std::cout << "[DualRL] Flat inference failed/timed out: " << error
+              << " elapsed_ms=" << elapsed_ms << std::endl;
+    requestEmergencyStop();
+    return false;
+  }
+  if (elapsed_ms > 10.f && now_us - _lastPolicyWarningTimeUs > kPolicyWarningPeriodUs) {
+    std::cout << "[DualRL] WARNING: flat inference took " << elapsed_ms << " ms" << std::endl;
+    _lastPolicyWarningTimeUs = now_us;
+  }
+  return acceptPolicyOutput(rapid_rl::AppliedTargetToHimAction(target_robot),
+                            rapid_rl::RobotToPolicyOrder(target_robot), true);
+}
+
+template <typename T>
+bool RLControlContext<T>::acceptPolicyOutput(
     const Vec12f& action_policy, const Vec12f& target_policy,
     bool stop_on_reject) {
   auto reject = [&](const std::string& reason) {
@@ -471,12 +611,17 @@ bool FSM_State_RLJointPD<T>::acceptPolicyOutput(
     }
   }
 
+  Vec12f proposed_robot = target_robot;
+  const bool blending = _switch.phase() == RLPolicySwitch::Phase::Blending;
+  if (blending) {
+    const float alpha = _switch.blend(_controlTimeUs);
+    proposed_robot = _blendOrigin + alpha * (target_robot - _blendOrigin);
+  }
+  const float limit = blending ? .05f : kMaxTargetDeltaPerPolicyStep;
+  _blendTargetReached = (proposed_robot - _lastTargetQRobot).cwiseAbs().maxCoeff() <= limit;
   for (int i = 0; i < rapid_rl::kActionDim; ++i) {
-    const float delta = target_robot[i] - _lastTargetQRobot[i];
-    const float limited_delta =
-        std::max(-kMaxTargetDeltaPerPolicyStep,
-                 std::min(kMaxTargetDeltaPerPolicyStep, delta));
-    _lastTargetQRobot[i] += limited_delta;
+    const float delta = proposed_robot[i] - _lastTargetQRobot[i];
+    _lastTargetQRobot[i] += std::max(-limit, std::min(limit, delta));
   }
 
   _lastActionPolicy = action_policy;
@@ -484,7 +629,7 @@ bool FSM_State_RLJointPD<T>::acceptPolicyOutput(
 }
 
 template <typename T>
-typename FSM_State_RLJointPD<T>::Vec12f FSM_State_RLJointPD<T>::readRobotQ()
+typename RLControlContext<T>::Vec12f RLControlContext<T>::readRobotQ()
     const {
   Vec12f q;
   for (int leg = 0; leg < 4; ++leg) {
@@ -497,7 +642,7 @@ typename FSM_State_RLJointPD<T>::Vec12f FSM_State_RLJointPD<T>::readRobotQ()
 }
 
 template <typename T>
-typename FSM_State_RLJointPD<T>::Vec12f FSM_State_RLJointPD<T>::readRobotQd()
+typename RLControlContext<T>::Vec12f RLControlContext<T>::readRobotQd()
     const {
   Vec12f qd;
   for (int leg = 0; leg < 4; ++leg) {
@@ -510,14 +655,14 @@ typename FSM_State_RLJointPD<T>::Vec12f FSM_State_RLJointPD<T>::readRobotQd()
 }
 
 template <typename T>
-typename FSM_State_RLJointPD<T>::Vec3f
-FSM_State_RLJointPD<T>::readBaseAngularVelocity() const {
+typename RLControlContext<T>::Vec3f
+RLControlContext<T>::readBaseAngularVelocity() const {
   return this->_data->_stateEstimator->getResult().omegaBody;
 }
 
 template <typename T>
-typename FSM_State_RLJointPD<T>::Vec3f
-FSM_State_RLJointPD<T>::readVelocityCommand() const {
+typename RLControlContext<T>::Vec3f
+RLControlContext<T>::readVelocityCommand() const {
   Vec3f command;
 
   if (this->_data->controlParameters->use_rc) {
@@ -539,6 +684,9 @@ FSM_State_RLJointPD<T>::readVelocityCommand() const {
         this->_data->_desiredStateCommand->gamepadCommand->rightStickAnalog[0];
   }
 
+  if (!command.allFinite()) return command;
+  if (_switch.zeroCommand()) return Vec3f::Zero();
+
   command[0] = std::max(-rapid_rl::kMaxCommandLinearX,
                         std::min(rapid_rl::kMaxCommandLinearX, command[0]));
   command[1] = std::max(-rapid_rl::kMaxCommandLinearY,
@@ -546,24 +694,33 @@ FSM_State_RLJointPD<T>::readVelocityCommand() const {
   command[2] = std::max(-rapid_rl::kMaxCommandYaw,
                         std::min(rapid_rl::kMaxCommandYaw, command[2]));
 
-  if (command.norm() < 0.05f) {
+  if (command.norm() < (_switch.active() == RLController::Flat ? .1f : .05f)) {
     command.setZero();
   }
   return command;
 }
 
 template <typename T>
-typename FSM_State_RLJointPD<T>::Vec3f
-FSM_State_RLJointPD<T>::readProjectedGravity() const {
+typename RLControlContext<T>::Vec3f
+RLControlContext<T>::readProjectedGravity() const {
   return this->_data->_stateEstimator->getResult().rBody *
          Vec3f(0.0f, 0.0f, -1.0f);
 }
 
 template <typename T>
-bool FSM_State_RLJointPD<T>::isOrientationUnsafe() const {
-  const auto& rpy = this->_data->_stateEstimator->getResult().rpy;
-  return std::fabs(rpy[0]) > kMaxRollPitchRad ||
+bool RLControlContext<T>::usesFlatSafety() const {
+  return _switch.active() == RLController::Flat ||
+      (_switch.phase() == RLPolicySwitch::Phase::Blending && _blendFrom == RLController::Flat);
+}
+
+template <typename T>
+bool RLControlContext<T>::isOrientationUnsafe() const {
+  const auto& estimate = this->_data->_stateEstimator->getResult();
+  const auto& rpy = estimate.rpy;
+  if (usesFlatSafety() && (!std::isfinite(estimate.rBody(2, 2)) ||
+                          estimate.rBody(2, 2) < std::cos(kMaxFlatTiltRad))) return true;
+  return !rpy.allFinite() || std::fabs(rpy[0]) > kMaxRollPitchRad ||
          std::fabs(rpy[1]) > kMaxRollPitchRad;
 }
 
-template class FSM_State_RLJointPD<float>;
+template class RLControlContext<float>;

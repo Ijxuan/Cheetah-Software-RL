@@ -58,10 +58,14 @@ int main() {
   auto axis = [&](unsigned char n, short v) { event(JS_EVENT_AXIS, n, v); };
   rc_control_settings out{};
   request_rc_off();
+  button(6, 1); button(6, 0); button(7, 1); button(7, 0);
+  get_rc_control_settings(&out);
+  check(out.mode == RC_mode::OFF, "START/BACK bypassed OFF");
   axis(2, 32767); button(0, 1); button(0, 0); axis(2, 0); // LT+A recover
   button(7, 1); button(7, 0); // BACK -> RL
   get_rc_control_settings(&out);
   check(out.mode == RC_mode::RL_JOINT_PD, "could not enter RL");
+  check(out.mode == RC_mode::RL_STAIRS, "BACK did not select stairs");
   axis(1, -16384); // manual vx=.5
   set_cmd_vel_command(.7, .1);
   get_rc_control_settings(&out);
@@ -103,11 +107,32 @@ int main() {
   get_rc_control_settings(&out);
   check(near(out.v_des[0], .5), "OFF recovery restored navigation");
   button(5, 1); set_cmd_vel_command(.3, 0);
-  button(6, 1); button(6, 0); // START leaves RL for recovery
-  button(5, 0); button(7, 1); button(7, 0);
+  button(6, 1); // START selects flat, preserves navigation
+  get_rc_control_settings(&out);
+  const auto selection_sequence = out.rl_selection_sequence;
+  check(out.mode == RC_mode::RL_FLAT &&
+        near(out.v_des[0], .3), "START lost navigation or did not select flat");
+  axis(0, 10000); // held START must not keep retrying
+  get_rc_control_settings(&out);
+  check(out.rl_selection_sequence == selection_sequence, "held START repeated selection");
+  button(6, 0);
+  button(7, 1); button(7, 0);
+  get_rc_control_settings(&out);
+  check(out.mode == RC_mode::RL_STAIRS && near(out.v_des[0], .3),
+        "BACK lost navigation or did not select stairs");
+  axis(2, 32767); button(3, 0); // no effect
+  button(2, 1); button(2, 0); axis(2, 0); // LT+X -> recovery
+  get_rc_control_settings(&out);
+  check(out.mode == RC_mode::RECOVERY_STAND, "LT+X did not recover");
+  button(5, 0); button(6, 1); button(6, 0); // START from recovery
   set_cmd_vel_command(.7, 0);
   get_rc_control_settings(&out);
-  check(near(out.v_des[0], .5), "leaving RL retained navigation");
+  check(out.mode == RC_mode::RL_FLAT && near(out.v_des[0], .5),
+        "recovery retained navigation or START failed from recovery");
+  button(5, 1); set_cmd_vel_command(.3, 0);
+  axis(2, 32767); button(1, 1); button(1, 0); axis(2, 0); // LT+B
+  get_rc_control_settings(&out);
+  check(out.mode == RC_mode::OFF, "LT+B did not override policy/navigation");
   request_rc_off();
   std::thread publisher([] {
     for (int i = 0; i < 10000; ++i) set_cmd_vel_command(.8, .8);

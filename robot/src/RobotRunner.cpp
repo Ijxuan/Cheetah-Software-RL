@@ -52,7 +52,7 @@ void RobotRunner::init() {
       &_stateEstimate, controlParameters);
   initializeStateEstimator(false);
 
-  memset(&rc_control, 0, sizeof(rc_control_settings));
+  rc_control = rc_control_settings{};
   // Initialize the DesiredStateCommand object
   _desiredStateCommand =
     new DesiredStateCommand<float>(driverCommand,

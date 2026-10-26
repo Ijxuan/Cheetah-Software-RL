@@ -24,7 +24,9 @@
 #define K_JOINT_PD 51
 #define K_IMPEDANCE_CONTROL 52
 
-#define K_RL_JOINT_PD 53
+#define K_RL_STAIRS 53
+#define K_RL_JOINT_PD K_RL_STAIRS  // compatibility with previous mode 53
+#define K_RL_FLAT 54
 
 #define K_INVALID 100
 
@@ -35,7 +37,8 @@ enum class FSM_StateName {
   INVALID,
   PASSIVE,
   JOINT_PD,
-  RL_JOINT_PD,
+  RL_STAIRS,
+  RL_JOINT_PD = RL_STAIRS,  // source compatibility; same stairs state
   IMPEDANCE_CONTROL,
   STAND_UP,
   BALANCE_STAND,
@@ -43,8 +46,13 @@ enum class FSM_StateName {
   RECOVERY_STAND,
   VISION,
   BACKFLIP,
-  FRONTJUMP
+  FRONTJUMP,
+  RL_FLAT
 };
+
+inline bool isRLState(FSM_StateName state) {
+  return state == FSM_StateName::RL_FLAT || state == FSM_StateName::RL_STAIRS;
+}
 
 /**
  *

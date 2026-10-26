@@ -5,6 +5,7 @@
 #ifndef _RT_RC_INTERFACE
 #define _RT_RC_INTERFACE
 #include <chrono>
+#include "RLControllerSelection.h"
 
 class rc_control_settings {
   public:
@@ -16,6 +17,7 @@ class rc_control_settings {
     double     omega_des[3]; // -1 ~ 1
     double     variable[3];
     double     step_height;
+    uint64_t rl_selection_sequence = 0;
 };
 
 // Thread-safe navigation input; only accepted after RB arms RL navigation.
@@ -30,7 +32,10 @@ namespace RC_mode{
   constexpr int VISION = 6;
   constexpr int LOCOMOTION = 11;
   constexpr int RECOVERY_STAND = 12;
-  constexpr int RL_JOINT_PD = 53;
+  constexpr int RL_STAIRS = 53;
+  constexpr int RL_JOINT_PD = RL_STAIRS;
+  constexpr int RL_FLAT = 54;
+  inline bool isRL(double mode) { return mode == RL_STAIRS || mode == RL_FLAT; }
 
   // Experiment Mode
   constexpr int TWO_LEG_STANCE_PRE = 20;

@@ -16,7 +16,7 @@
  */
 template <typename T>
 FSM_State_RecoveryStand<T>::FSM_State_RecoveryStand(ControlFSMData<T>* _controlFSMData)
-    : FSM_State<T>(_controlFSMData, FSM_StateName::STAND_UP, "STAND_UP"){
+    : FSM_State<T>(_controlFSMData, FSM_StateName::RECOVERY_STAND, "RECOVERY_STAND"){
   // Do nothing
   // Set the pre controls safety checks
   this->checkSafeOrientation = false;
@@ -297,8 +297,13 @@ FSM_StateName FSM_State_RecoveryStand<T>::checkTransition() {
       this->nextStateName = FSM_StateName::VISION;
       break;
 
-    case K_RL_JOINT_PD:
-      this->nextStateName = FSM_StateName::RL_JOINT_PD;
+    case K_RL_FLAT:
+      this->nextStateName = FSM_StateName::RL_FLAT;
+      this->transitionDuration = 0.0;
+      break;
+
+    case K_RL_STAIRS:
+      this->nextStateName = FSM_StateName::RL_STAIRS;
       // Transition time is immediate
       this->transitionDuration = 0.0;
       break;
@@ -347,7 +352,8 @@ TransitionData<T> FSM_State_RecoveryStand<T>::transition() {
       this->transitionData.done = true;
       break;
 
-    case FSM_StateName::RL_JOINT_PD:
+    case FSM_StateName::RL_FLAT:
+    case FSM_StateName::RL_STAIRS:
       this->transitionData.done = true;
       break;
 

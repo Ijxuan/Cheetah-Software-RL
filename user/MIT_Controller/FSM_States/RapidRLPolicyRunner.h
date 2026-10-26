@@ -27,6 +27,17 @@ class OnnxPolicyRunner {
 
   bool load();
   void resetObservationHistory();
+  // Observation updates continue at 20 ms even while the flat policy owns PD.
+  bool observe(const Vec3f& base_angular_velocity, const Vec3f& projected_gravity,
+               const Vec3f& command, const Vec12f& q_policy,
+               const Vec12f& qd_policy, const Vec12f& last_action,
+               std::string* error);
+  bool inferFromHistory(Vec12f* action, Vec12f* target_q,
+                        float* inference_time_ms, std::string* error);
+  bool historyReady() const { return history_frames_ == kHistorySteps; }
+  const Eigen::Matrix<float, kObsDim, 1>& observationHistory() const {
+    return observation_history_;
+  }
   bool infer(const Vec3f& base_angular_velocity,
              const Vec3f& projected_gravity,
              const Vec3f& command,
@@ -63,6 +74,7 @@ class OnnxPolicyRunner {
   std::vector<float> timing_samples_;
   Eigen::Matrix<float, kObsDim, 1> observation_history_ =
       Eigen::Matrix<float, kObsDim, 1>::Zero();
+  int history_frames_ = 0;
 
   bool runPolicy(Vec12f* action, std::string* error);
   std::unique_ptr<Ort::Env> env_;

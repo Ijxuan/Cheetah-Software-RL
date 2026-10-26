@@ -22,7 +22,7 @@ static double navigation_time()
 void set_cmd_vel_command(double vx, double wz)
 {
     std::lock_guard<std::mutex> lock(lcm_get_set_mutex);
-    if (rc_control.mode == RC_mode::RL_JOINT_PD)
+    if (RC_mode::isRL(rc_control.mode))
         navigation.receive(vx, wz, navigation_time());
 }
 
@@ -32,7 +32,7 @@ void set_cmd_vel_command(double vx, double wz)
 void get_rc_control_settings(void *settings)
 {
     std::lock_guard<std::mutex> lock(lcm_get_set_mutex);
-    if (rc_control.mode != RC_mode::RL_JOINT_PD) navigation.cancel();
+    if (!RC_mode::isRL(rc_control.mode)) navigation.cancel();
     auto snapshot = rc_control;
     double vx = 0., wz = 0.;
     if (navigation.sample(navigation_time(), &vx, &wz)) {
@@ -303,7 +303,8 @@ T clamp(T value, T min_val, T max_val)
 
 void js_complete(int port)
 {
-
+    const bool previous_start = map.start;
+    const bool previous_back = map.back;
     int len = xbox_map_read(port, &map);
     if (len < 0)
         return;
@@ -331,10 +332,14 @@ void js_complete(int port)
         rc_control.mode = RC_mode::RECOVERY_STAND;
     else if (map.lt > 30000 && map.b) // LT+B，失能
         rc_control.mode = RC_mode::OFF;
-    else if (rc_control.mode != RC_mode::OFF && rc_control.mode != RC_mode::RL_JOINT_PD && map.back)
-        rc_control.mode = RC_mode::RL_JOINT_PD; // 如果不是失能和运动模式，按下back键，进入运动模式-原地展示
-    else if (rc_control.mode != RC_mode::OFF && ((map.lt > 30000 && map.x) || map.start))
-        rc_control.mode = RC_mode::RECOVERY_STAND; // 如果不是失能模式，按下start键或者（按下lt加x键），进入站立模式-可以移动
+    else if (rc_control.mode != RC_mode::OFF && map.lt > 30000 && map.x)
+        rc_control.mode = RC_mode::RECOVERY_STAND;
+    else if (rc_control.mode != RC_mode::OFF &&
+             ((map.back && !previous_back) || (map.start && !previous_start))) {
+        // BACK wins if both are pressed. Held buttons never retry a switch.
+        ++rc_control.rl_selection_sequence;
+        rc_control.mode = map.back ? RC_mode::RL_STAIRS : RC_mode::RL_FLAT;
+    }
     else if (rc_control.mode == RC_mode::QP_STAND)
     {
         rc_control.rpy_des[0] = (float)map.lx / 32768; // 如果是站立模式，设置目标角度
@@ -346,9 +351,9 @@ void js_complete(int port)
         rc_control.omega_des[1] = 0;
         rc_control.omega_des[2] = 0;
     }
-    navigation.buttons(rc_control.mode == RC_mode::RL_JOINT_PD,
+    navigation.buttons(RC_mode::isRL(rc_control.mode),
                        map.rb, map.rt > 15000, navigation_time());
-    if (rc_control.mode == RC_mode::RL_JOINT_PD) {
+    if (RC_mode::isRL(rc_control.mode)) {
         // Always refresh manual input. Navigation overrides only the snapshot,
         // so RT takes effect on this event without retaining a navigation speed.
         rc_control.v_des[0] = -(double)map.ly / 32768;
@@ -429,7 +434,7 @@ void sbus_packet_complete()
         }
         rc_control.mode = selected_mode;
     }
-    if (rc_control.mode != RC_mode::RL_JOINT_PD) navigation.cancel();
+    if (!RC_mode::isRL(rc_control.mode)) navigation.cancel();
 }
 
 void *v_memcpy(void *dest, volatile void *src, size_t n)

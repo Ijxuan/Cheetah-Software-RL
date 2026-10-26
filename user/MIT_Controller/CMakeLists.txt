@@ -26,7 +26,7 @@ list(REMOVE_ITEM sources
   "tools/rapid_rl_policy_benchmark.cpp"
   "tools/rapid_rl_policy_config_test.cpp")
 foreach(MIT_CTRL_SOURCE ${sources})
-  if(MIT_CTRL_SOURCE MATCHES "rapid_rl_policy_(benchmark|config_test)\\.cpp$")
+  if(MIT_CTRL_SOURCE MATCHES "tools/.*\\.cpp$")
     list(REMOVE_ITEM sources "${MIT_CTRL_SOURCE}")
   endif()
 endforeach()
@@ -35,14 +35,14 @@ add_subdirectory(Controllers/WBC)
 add_subdirectory(Controllers/WBC_Ctrl)
 add_subdirectory(Controllers/VisionMPC)
 
-add_executable(mit_ctrl ${sources} MIT_Controller.cpp main.cpp)
-target_link_libraries(mit_ctrl robot biomimetics)
-target_link_libraries(mit_ctrl dynacore_param_handler qpOASES)
-target_link_libraries(mit_ctrl Goldfarb_Optimizer osqp)
-target_link_libraries(mit_ctrl WBC_Ctrl)
-target_link_libraries(mit_ctrl VisionMPC)
-target_link_libraries(mit_ctrl stdc++fs)
-target_link_libraries(mit_ctrl onnxruntime)
+list(FILTER sources EXCLUDE REGEX "/main\\.cpp$")
+# Production and integration tests link the exact same FSM implementation.
+add_library(mit_controller_core STATIC ${sources})
+target_link_libraries(mit_controller_core PUBLIC robot biomimetics
+  dynacore_param_handler qpOASES Goldfarb_Optimizer osqp WBC_Ctrl VisionMPC
+  stdc++fs onnxruntime)
+add_executable(mit_ctrl main.cpp)
+target_link_libraries(mit_ctrl mit_controller_core)
 
 add_executable(rapid_rl_policy_benchmark
   tools/rapid_rl_policy_benchmark.cpp
@@ -56,6 +56,15 @@ add_test(NAME legged_gym_rl_policy_config
 
 add_test(NAME himloco_onnx_policy_inference COMMAND rapid_rl_policy_benchmark 100)
 
+add_executable(dual_rl_policy_test tools/dual_rl_policy_test.cpp
+  FSM_States/FlatPolicyRunner.cpp FSM_States/RapidRLPolicyRunner.cpp)
+target_link_libraries(dual_rl_policy_test onnxruntime)
+add_test(NAME dual_rl_policy COMMAND dual_rl_policy_test)
+
+add_executable(dual_rl_controller_test tools/dual_rl_controller_test.cpp)
+target_link_libraries(dual_rl_controller_test mit_controller_core)
+add_test(NAME dual_rl_controller COMMAND dual_rl_controller_test)
+
 # Recent ONNX Runtime headers require C++17; keep bundled dependencies on C++14.
-set_target_properties(mit_ctrl rapid_rl_policy_benchmark PROPERTIES
+set_target_properties(mit_ctrl mit_controller_core rapid_rl_policy_benchmark dual_rl_policy_test dual_rl_controller_test PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES)

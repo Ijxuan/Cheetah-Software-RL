@@ -44,7 +44,9 @@ ControlFSM<T>::ControlFSM(Quadruped<T>* _quadruped,
   statesList.invalid = nullptr;
   statesList.passive = new FSM_State_Passive<T>(&data);
   statesList.jointPD = new FSM_State_JointPD<T>(&data);
-  statesList.rlJointPD = new FSM_State_RLJointPD<T>(&data);
+  rlContext = std::make_shared<RLControlContext<T>>(&data);
+  statesList.rlFlat = new FSM_State_RLFlat<T>(&data, rlContext);
+  statesList.rlStairs = new FSM_State_RLStairs<T>(&data, rlContext);
   statesList.impedanceControl = new FSM_State_ImpedanceControl<T>(&data);
   statesList.standUp = new FSM_State_StandUp<T>(&data);
   statesList.balanceStand = new FSM_State_BalanceStand<T>(&data);
@@ -65,7 +67,22 @@ ControlFSM<T>::ControlFSM(Quadruped<T>* _quadruped,
  * Passive state and Normal operation mode.
  */
 template <typename T>
+ControlFSM<T>::ControlFSM(const ControlFSMData<T>& initial_data,
+                         const FSM_StatesList<T>& states,
+                         std::shared_ptr<RLControlContext<T>> context)
+    : data(initial_data), rlContext(std::move(context)), statesList(states) {
+  safetyChecker = new SafetyChecker<T>(&data);
+  initialize();
+}
+
+template <typename T>
 void ControlFSM<T>::initialize() {
+  // RobotRunner calls initialize() on RC OFF; clean up an interrupted handover
+  // before losing the old state's pointer, including histories and output.
+  if (currentState && isRLState(currentState->stateName)) {
+    currentState->nextStateName = FSM_StateName::PASSIVE;
+    currentState->onExit();
+  }
   // Initialize a new FSM State with the control data
   currentState = statesList.passive;
 
@@ -99,7 +116,9 @@ void ControlFSM<T>::runFSM() {
 
   if(data.controlParameters->use_rc){
     int rc_mode = data._desiredStateCommand->rcCommand->mode;
-    if(rc_mode == RC_mode::RECOVERY_STAND){
+    if(rc_mode == RC_mode::OFF){
+      data.controlParameters->control_mode = K_PASSIVE;
+    } else if(rc_mode == RC_mode::RECOVERY_STAND){
       data.controlParameters->control_mode = K_RECOVERY_STAND;
 
     } else if(rc_mode == RC_mode::LOCOMOTION){
@@ -108,8 +127,10 @@ void ControlFSM<T>::runFSM() {
     } else if(rc_mode == RC_mode::QP_STAND){
       data.controlParameters->control_mode = K_BALANCE_STAND;
 
-    } else if(rc_mode == RC_mode::RL_JOINT_PD){
-      data.controlParameters->control_mode = K_RL_JOINT_PD;
+    } else if(rc_mode == RC_mode::RL_STAIRS){
+      data.controlParameters->control_mode = K_RL_STAIRS;
+    } else if(rc_mode == RC_mode::RL_FLAT){
+      data.controlParameters->control_mode = K_RL_FLAT;
 
     } else if(rc_mode == RC_mode::VISION){
       data.controlParameters->control_mode = K_VISION;
@@ -175,6 +196,10 @@ void ControlFSM<T>::runFSM() {
     }
 
   } else { // if ESTOP
+    if (isRLState(currentState->stateName)) {
+      currentState->nextStateName = FSM_StateName::PASSIVE;
+      currentState->onExit();
+    }
     currentState = statesList.passive;
     currentState->onEnter();
     nextStateName = currentState->stateName;
@@ -260,8 +285,10 @@ FSM_State<T>* ControlFSM<T>::getNextState(FSM_StateName stateName) {
     case FSM_StateName::JOINT_PD:
       return statesList.jointPD;
 
-    case FSM_StateName::RL_JOINT_PD:
-      return statesList.rlJointPD;
+    case FSM_StateName::RL_STAIRS:
+      return statesList.rlStairs;
+    case FSM_StateName::RL_FLAT:
+      return statesList.rlFlat;
 
     case FSM_StateName::IMPEDANCE_CONTROL:
       return statesList.impedanceControl;
