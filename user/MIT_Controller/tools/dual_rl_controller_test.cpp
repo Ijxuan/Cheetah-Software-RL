@@ -113,7 +113,9 @@ int main() {
       // A held nonzero RC command must return after every completed handover.
       if (params.use_rc && before_phase == Phase::Running && after_phase == Phase::Running &&
           state.flatHistory().ready() && state.flatHistory().latest().time_us == time)
-        check(std::fabs(state.flatHistory().latest().command[0] - float(rc.v_des[0])) < 1e-6f,
+        check(std::fabs(state.flatHistory().latest().command[0] -
+              std::max(-float(RC_mode::forwardSpeedLimit(state.activeMode())),
+                       std::min(float(RC_mode::forwardSpeedLimit(state.activeMode())), float(rc.v_des[0])))) < 1e-6f,
               "forward command remained zero after handover");
       if (state.policySwitch().zeroCommand() && state.flatHistory().ready() &&
           state.flatHistory().latest().time_us == time)
@@ -141,6 +143,13 @@ int main() {
         state.policySwitch().phase() == Phase::Running, "flat -> stairs failed");
   check(state.stairsRunner().timingSummary(&timing) && timing.count > 0,
         "stairs never ran inference");
+  rc.v_des[0] = .9; step(50);
+  check(std::fabs(state.flatHistory().latest().command[0] - .6f) < 1e-6f,
+        "stairs policy accepted forward command above 0.6 m/s");
+  rc.v_des[0] = -.9; step(50);
+  check(std::fabs(state.flatHistory().latest().command[0] + .6f) < 1e-6f,
+        "stairs policy accepted reverse command below -0.6 m/s");
+  rc.v_des[0] = .3;
   step(1200); // Exercise the full two-second post-handover diagnostic window.
 
   check(std::fabs(legs.commands[0].kpJoint(0, 0) - 20.f) < 1e-6f, "HIM real robot gains changed");

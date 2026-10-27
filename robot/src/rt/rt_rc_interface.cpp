@@ -95,8 +95,9 @@ TaranisSwitchState initial_mode_go_switch = SWITCH_DOWN;
 #define XBOX_BUTTON_Y 0x03
 #define XBOX_BUTTON_LB 0x04
 #define XBOX_BUTTON_RB 0x05
-#define XBOX_BUTTON_START 0x06
-#define XBOX_BUTTON_BACK 0x07
+// Physical labels on the deployed Logitech joystick (Linux js button IDs).
+#define XBOX_BUTTON_START 0x07
+#define XBOX_BUTTON_BACK 0x06
 #define XBOX_BUTTON_HOME 0x08
 #define XBOX_BUTTON_LO 0x09 /* 左摇杆按键 */
 #define XBOX_BUTTON_RO 0x0a /* 右摇杆按键 */
@@ -209,12 +210,10 @@ int xbox_map_read(int xbox_fd, xbox_map_t *map)
             break;
 
         case XBOX_BUTTON_START:
-            // printf("XBOX_BUTTON_START is down\n");对应罗技手柄的back键
             map->start = value;
             break;
 
         case XBOX_BUTTON_BACK:
-            // printf("XBOX_BUTTON_BACK is down\n");对应罗技手柄的START键
             map->back = value;
             break;
 
@@ -368,7 +367,8 @@ void js_complete(int port)
     if (RC_mode::isRL(rc_control.mode)) {
         // Always refresh manual input. Navigation overrides only the snapshot,
         // so RT takes effect on this event without retaining a navigation speed.
-        rc_control.v_des[0] = -(double)map.ly / 32768;
+        rc_control.v_des[0] = RC_mode::forwardSpeedLimit(rc_control.mode) *
+            -(double)map.ly / 32768;
         rc_control.v_des[1] = -0.5 * (double)map.lx / 32768;
         rc_control.v_des[2] = 0.;
         rc_control.omega_des[0] = rc_control.omega_des[1] = 0.;

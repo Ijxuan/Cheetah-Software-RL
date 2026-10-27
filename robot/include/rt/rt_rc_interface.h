@@ -45,6 +45,10 @@ namespace RC_mode{
   constexpr int RL_STAIRS = 53;
   constexpr int RL_JOINT_PD = RL_STAIRS;
   constexpr int RL_FLAT = 54;
+  constexpr double kStairsMaxForwardSpeed = 0.6; // m/s, symmetric forward/reverse
+  inline double forwardSpeedLimit(double mode) {
+    return mode == RL_STAIRS ? kStairsMaxForwardSpeed : 1.0;
+  }
   inline bool isRL(double mode) { return mode == RL_STAIRS || mode == RL_FLAT; }
 
   // Experiment Mode

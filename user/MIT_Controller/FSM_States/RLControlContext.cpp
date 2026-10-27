@@ -422,7 +422,7 @@ void RLControlContext<T>::reportPostSwitchInput(int64_t now_us, const Vec3f& com
       RLPolicySwitch::phaseName(_switch.phase()), int(_data->controlParameters->use_rc),
       int(d.joystick_valid), static_cast<unsigned long long>(d.event_sequence),
       d.event_age_ms, d.lx, d.ly, d.rx, d.rb, d.rt,
-      -d.ly / 32768., -.5 * d.lx / 32768., -d.rx / 32768., nav, rc.mode,
+      -RC_mode::forwardSpeedLimit(rc.mode) * d.ly / 32768., -.5 * d.lx / 32768., -d.rx / 32768., nav, rc.mode,
       rc.v_des[0], rc.v_des[1], rc.omega_des[2], int(_switch.zeroCommand()),
       _switch.active() == RLController::Flat ? .1 : .05,
       double(command[0]), double(command[1]), double(command[2]));
@@ -698,6 +698,8 @@ template <typename T>
 typename RLControlContext<T>::Vec3f
 RLControlContext<T>::readVelocityCommand() const {
   Vec3f command;
+  const float max_forward = _switch.active() == RLController::Stairs ?
+      float(RC_mode::kStairsMaxForwardSpeed) : rapid_rl::kMaxCommandLinearX;
 
   if (this->_data->controlParameters->use_rc) {
     command[0] = static_cast<float>(
@@ -708,7 +710,7 @@ RLControlContext<T>::readVelocityCommand() const {
         this->_data->_desiredStateCommand->rcCommand->omega_des[2]);
   } else {
     command[0] =
-        rapid_rl::kMaxCommandLinearX *
+        max_forward *
         this->_data->_desiredStateCommand->gamepadCommand->leftStickAnalog[1];
     command[1] =
         -rapid_rl::kMaxCommandLinearY *
@@ -721,8 +723,7 @@ RLControlContext<T>::readVelocityCommand() const {
   if (!command.allFinite()) return command;
   if (_switch.zeroCommand()) return Vec3f::Zero();
 
-  command[0] = std::max(-rapid_rl::kMaxCommandLinearX,
-                        std::min(rapid_rl::kMaxCommandLinearX, command[0]));
+  command[0] = std::max(-max_forward, std::min(max_forward, command[0]));
   command[1] = std::max(-rapid_rl::kMaxCommandLinearY,
                         std::min(rapid_rl::kMaxCommandLinearY, command[1]));
   command[2] = std::max(-rapid_rl::kMaxCommandYaw,

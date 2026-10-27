@@ -58,18 +58,18 @@ int main() {
   auto axis = [&](unsigned char n, short v) { event(JS_EVENT_AXIS, n, v); };
   rc_control_settings out{};
   request_rc_off();
-  button(6, 1); button(6, 0); button(7, 1); button(7, 0);
+  button(7, 1); button(7, 0); button(6, 1); button(6, 0);
   get_rc_control_settings(&out);
   check(out.mode == RC_mode::OFF, "START/BACK bypassed OFF");
   axis(2, 32767); button(0, 1); button(0, 0); axis(2, 0); // LT+A recover
-  button(7, 1); button(7, 0); // BACK -> RL
+  button(6, 1); button(6, 0); // BACK -> RL
   get_rc_control_settings(&out);
   check(out.mode == RC_mode::RL_JOINT_PD, "could not enter RL");
   check(out.mode == RC_mode::RL_STAIRS, "BACK did not select stairs");
-  axis(1, -16384); // manual vx=.5
+  axis(1, -16384); // stairs manual vx=.3
   set_cmd_vel_command(.7, .1);
   get_rc_control_settings(&out);
-  check(near(out.v_des[0], .5), "unarmed navigation overrode manual");
+  check(near(out.v_des[0], .3), "unarmed navigation overrode manual");
   button(5, 1); // RB
   get_rc_control_settings(&out);
   check(out.v_des[0] == 0, "entry used old packet/manual input");
@@ -84,7 +84,7 @@ int main() {
   check(near(out.v_des[0], .4) && out.v_des[1] == 0, "held RB cleared command");
   axis(5, 20000); // RT immediate manual
   get_rc_control_settings(&out);
-  check(near(out.v_des[0], .5), "RT retained navigation speed");
+  check(near(out.v_des[0], .3), "RT retained navigation speed");
   axis(5, 0); button(5, 0); button(5, 1);
   set_cmd_vel_command(.3, 0);
   std::this_thread::sleep_for(std::chrono::milliseconds(1050));
@@ -102,12 +102,12 @@ int main() {
   check(out.mode == RC_mode::OFF && out.v_des[0] == 0, "OFF overridden");
   button(5, 0);
   axis(2, 32767); button(0, 1); button(0, 0); axis(2, 0);
-  button(7, 1); button(7, 0);
+  button(6, 1); button(6, 0);
   set_cmd_vel_command(.7, 0);
   get_rc_control_settings(&out);
-  check(near(out.v_des[0], .5), "OFF recovery restored navigation");
+  check(near(out.v_des[0], .3), "OFF recovery restored navigation");
   button(5, 1); set_cmd_vel_command(.3, 0);
-  button(6, 1); // START selects flat, preserves navigation
+  button(7, 1); // START selects flat, preserves navigation
   get_rc_control_settings(&out);
   const auto selection_sequence = out.rl_selection_sequence;
   check(out.mode == RC_mode::RL_FLAT &&
@@ -115,8 +115,8 @@ int main() {
   axis(0, 10000); // held START must not keep retrying
   get_rc_control_settings(&out);
   check(out.rl_selection_sequence == selection_sequence, "held START repeated selection");
-  button(6, 0);
-  button(7, 1); button(7, 0);
+  button(7, 0);
+  button(6, 1); button(6, 0);
   get_rc_control_settings(&out);
   check(out.mode == RC_mode::RL_STAIRS && near(out.v_des[0], .3),
         "BACK lost navigation or did not select stairs");
@@ -124,7 +124,7 @@ int main() {
   button(2, 1); button(2, 0); axis(2, 0); // LT+X -> recovery
   get_rc_control_settings(&out);
   check(out.mode == RC_mode::RECOVERY_STAND, "LT+X did not recover");
-  button(5, 0); button(6, 1); button(6, 0); // START from recovery
+  button(5, 0); button(7, 1); button(7, 0); // START from recovery
   set_cmd_vel_command(.7, 0);
   get_rc_control_settings(&out);
   check(out.mode == RC_mode::RL_FLAT && near(out.v_des[0], .5),
@@ -133,7 +133,7 @@ int main() {
   // erase it, even when no new LY event arrives from the joystick driver.
   axis(0, 7252); axis(1, 2849); axis(3, 0);
   for (int i = 0; i < 12; ++i) {
-    const unsigned char select = i % 2 ? 6 : 7;
+    const unsigned char select = i % 2 ? 7 : 6;
     button(select, 1); button(select, 0);
     axis(3, i % 2 ? 12000 : -12000);
     get_rc_control_settings(&out);
@@ -143,7 +143,7 @@ int main() {
           out.input_diagnostics.navigation_state == 0 &&
           out.input_diagnostics.event_age_ms >= 0.,
           "input diagnostics did not match the manual RC snapshot");
-    check(near(out.v_des[0], -2849. / 32768.) &&
+    check(near(out.v_des[0], -(i % 2 ? 1. : .6) * 2849. / 32768.) &&
           near(out.v_des[1], -.5 * 7252. / 32768.),
           "held left stick was lost during mode/right-stick changes");
   }
@@ -151,6 +151,19 @@ int main() {
   check(near(out.v_des[0], 18392. / 32768.), "forward input stayed latched at zero");
   axis(1, 18392); get_rc_control_settings(&out);
   check(near(out.v_des[0], -18392. / 32768.), "reverse input stayed latched at zero");
+  // Full and half stick travel use the stairs range, not a flat-speed plateau.
+  button(6, 1); button(6, 0); // physical BACK -> stairs
+  axis(1, -32768); get_rc_control_settings(&out);
+  check(near(out.v_des[0], .6), "stairs full forward is not 0.6 m/s");
+  axis(1, -16384); get_rc_control_settings(&out);
+  check(near(out.v_des[0], .3), "stairs half forward is not 0.3 m/s");
+  axis(1, 32767); get_rc_control_settings(&out);
+  check(near(out.v_des[0], -.6 * 32767. / 32768.), "stairs reverse scaling incorrect");
+  axis(6, 32767); axis(7, -32768); get_rc_control_settings(&out);
+  check(out.mode == RC_mode::RL_STAIRS && near(out.v_des[0], -.6 * 32767. / 32768.),
+        "D-pad unexpectedly changed mode or velocity");
+  button(7, 1); button(7, 0); axis(1, -32768); get_rc_control_settings(&out);
+  check(out.mode == RC_mode::RL_FLAT && near(out.v_des[0], 1.), "physical START/flat range incorrect");
   button(5, 1); set_cmd_vel_command(.3, 0);
   axis(2, 32767); button(1, 1); button(1, 0); axis(2, 0); // LT+B
   get_rc_control_settings(&out);
