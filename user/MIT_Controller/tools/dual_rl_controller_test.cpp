@@ -124,18 +124,28 @@ int main() {
   InferenceTimingSummary timing;
   check(!state.stairsRunner().timingSummary(&timing), "inactive HIM policy ran inference");
   rc.mode = RC_mode::RL_STAIRS; ++rc.rl_selection_sequence;
-  estimate.vBody[0] = .2f;
+  estimate.omegaBody[0] = .2f;
   step(150);
   check(state.policySwitch().active() == RLController::Flat &&
-        state.policySwitch().phase() == Phase::Stopping, "switched while moving");
-  estimate.vBody.setZero();
+        state.policySwitch().phase() == Phase::Stopping, "switched at angular-speed limit");
+  estimate.omegaBody[0] = .19f;
+  estimate.vBody[0] = .3f;
+  for (int leg = 0; leg < 4; ++leg) legs.datas[leg].qd.setConstant(.8f);
   step(450);
   check(state.policySwitch().active() == RLController::Stairs &&
         state.policySwitch().phase() == Phase::Running, "flat -> stairs failed");
   check(state.stairsRunner().timingSummary(&timing) && timing.count > 0,
         "stairs never ran inference");
   check(std::fabs(legs.commands[0].kpJoint(0, 0) - 20.f) < 1e-6f, "HIM real robot gains changed");
+  estimate.vBody.setZero(); estimate.omegaBody.setZero();
+  for (int leg = 0; leg < 4; ++leg) legs.datas[leg].qd.setZero();
   rc.mode = RC_mode::RL_FLAT; ++rc.rl_selection_sequence;
+  estimate.rpy[0] = 31.f * float(M_PI) / 180.f;
+  estimate.rBody = Eigen::AngleAxisf(estimate.rpy[0], Eigen::Vector3f::UnitX()).toRotationMatrix();
+  step(150);
+  check(fsm.currentState == &stairs && state.policySwitch().phase() == Phase::Stopping,
+        "entered flat above 30 degree tilt limit");
+  estimate.rpy.setZero(); estimate.rBody.setIdentity();
   step(450);
   check(state.policySwitch().active() == RLController::Flat &&
         state.policySwitch().phase() == Phase::Running, "stairs -> flat failed");
@@ -147,11 +157,11 @@ int main() {
   state.stairsRunner().timingSummary(&timing);
   check(timing.count == count_flat, "inactive HIM inference kept running");
   rc.mode = RC_mode::RL_STAIRS; ++rc.rl_selection_sequence;
-  estimate.vBody[0] = .2f;
+  estimate.omegaBody[0] = .2f;
   step(2600);
   check(state.policySwitch().phase() == Phase::Blocked &&
         state.policySwitch().active() == RLController::Flat, "handover timeout failed");
-  estimate.vBody.setZero(); step(200);
+  estimate.omegaBody.setZero(); step(200);
   check(state.policySwitch().phase() == Phase::Blocked, "timeout resumed automatically");
   ++rc.rl_selection_sequence; step(450);
   check(state.policySwitch().active() == RLController::Stairs &&

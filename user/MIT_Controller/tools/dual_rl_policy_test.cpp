@@ -146,9 +146,9 @@ int main() {
   check(sw.phase() == Phase::Running, "startup did not finish");
   sw.request(RLController::Stairs, 2, 200000, true);
   sw.tick(210000, true, true); sw.tick(400000, false, true);
-  sw.tick(500000, true, true); sw.tick(799999, true, true);
-  check(sw.active() == RLController::Flat && sw.zeroCommand(), "switched before continuous settling");
-  sw.tick(800000, true, true);
+  sw.tick(500000, true, true); sw.tick(699999, true, true);
+  check(sw.active() == RLController::Flat && sw.phase() == Phase::Stopping, "ready before continuous 200 ms settling");
+  sw.tick(700000, true, true);
   check(sw.active() == RLController::Flat && sw.phase() == Phase::Ready,
         "preparation changed policy owner before FSM onEnter");
   check(!sw.activate(RLController::Flat, 800000), "wrong destination activated");

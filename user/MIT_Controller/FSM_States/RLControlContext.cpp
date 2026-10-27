@@ -40,6 +40,8 @@ constexpr float kMaxKnee = 3.0f;
 constexpr float kMaxRollPitchDeg = 45.0f;
 constexpr float kMaxRollPitchRad =
     kMaxRollPitchDeg * static_cast<float>(M_PI) / 180.0f;
+// Handover allows translation and leg motion; only body rotation must settle.
+constexpr float kMaxHandoverAngularSpeed = .2f;  // rad/s
 // Preserve the legacy flat policy's total body-tilt limit, including blending.
 constexpr float kMaxFlatTiltDeg = 30.f;
 constexpr float kMaxFlatTiltRad = kMaxFlatTiltDeg * static_cast<float>(M_PI) / 180.f;
@@ -353,8 +355,7 @@ bool RLControlContext<T>::stationaryFor(RLController selected) const {
   const Vec12f qd = readRobotQd();
   return (selected != RLController::Flat || estimate.rBody(2, 2) >= std::cos(kMaxFlatTiltRad)) &&
       estimate.vBody.allFinite() && estimate.omegaBody.allFinite() && qd.allFinite() &&
-      estimate.vBody.norm() < .05f && estimate.omegaBody.norm() < .1f &&
-      qd.cwiseAbs().maxCoeff() < .5f;
+      estimate.omegaBody.norm() < kMaxHandoverAngularSpeed;
 }
 
 template <typename T>

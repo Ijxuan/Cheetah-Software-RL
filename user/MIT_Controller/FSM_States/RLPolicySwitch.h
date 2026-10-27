@@ -7,7 +7,7 @@
 class RLPolicySwitch {
  public:
   enum class Phase { Preparing, Running, Stopping, Ready, Blending, Blocked };
-  static constexpr int64_t kSettledUs = 300000;
+  static constexpr int64_t kSettledUs = 200000;
   static constexpr int64_t kStopTimeoutUs = 5000000;
   static constexpr int64_t kBlendUs = 500000;
   static constexpr int64_t kWarmupUs = 120000;
