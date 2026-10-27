@@ -55,6 +55,7 @@ class RLControlContext {
   bool updateHistories(int64_t now_us);
   void runAtTime(RLController owner, int64_t now_us);
   void reportSwitch();
+  void reportPostSwitchInput(int64_t now_us, const Vec3f& command);
   bool acceptPolicyOutput(const Vec12f& action_policy,
                           const Vec12f& target_policy,
                           bool stop_on_reject);
@@ -84,6 +85,7 @@ class RLControlContext {
   int64_t _lastStairsHistoryTimeUs = 0;
   unsigned _historyTick = 0;
   int64_t _controlTimeUs = 0;
+  int64_t _inputDebugStartUs = 0, _inputDebugUntilUs = 0, _inputDebugNextUs = 0;
   bool _stairsObservationDue = false;
   bool _blendTargetReached = false;
   Vec12f _blendOrigin;

@@ -163,3 +163,18 @@ ctest --output-on-failure -R 'navigation_command|legged_gym_rl_policy_config|him
 最后连接完整规划器。对照发送速度、`rl_robot_state.command`、实际速度和姿态，
 确认规划器不会在楼梯入口停车或产生未经验证的连续转向。
 编译与离线测试不能替代真实网络联调及实机楼梯验证。
+
+### 切换后手柄诊断
+
+每次 RL 状态交接的 blending 结束后，自动打印 2 秒 `[RLInput]`，频率 10 Hz，
+每次最多 20 行；退出 RL 后停止。新一次交接完成会重新开始计时。
+`raw_l=(lx,ly)`、`raw_rx`、`RB/RT` 是与 RC 指令同一快照中的手柄数据；
+`event` 为事件计数，`age_ms` 为最近手柄事件距快照的时间（保持推杆时不产生新事件是正常的）。
+`js_valid=0` 表示没有有效手柄快照，例如离线测试或其他输入源。
+`manual=(vx,vy,wz)` 为原始手柄映射，`nav` 表示导航状态，`rc` 为导航仲裁后的指令，
+`policy_cmd` 是本次实际写入策略历史的速度指令，三个向量均按 `(vx,vy,wz)` 排列。
+`phase/zero_gate/deadband` 用于解释切换清零及死区；`use_rc=0` 时策略读取 GUI 手柄，
+此时 RC 和原始遥控值不代表策略输入。
+
+若 `manual` 非零但 `rc` 为零，检查导航状态；若 `rc` 非零但 `policy_cmd` 为零，
+检查切换阶段与合成指令死区；若 `policy_cmd` 正常变化而机器人不响应，再检查策略输出。

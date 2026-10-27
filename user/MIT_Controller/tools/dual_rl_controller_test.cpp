@@ -110,6 +110,11 @@ int main() {
         check(delta <= .05001f, "handover target step exceeded .05 rad");
       }
       check(target().allFinite(), "non-finite joint target");
+      // A held nonzero RC command must return after every completed handover.
+      if (params.use_rc && before_phase == Phase::Running && after_phase == Phase::Running &&
+          state.flatHistory().ready() && state.flatHistory().latest().time_us == time)
+        check(std::fabs(state.flatHistory().latest().command[0] - float(rc.v_des[0])) < 1e-6f,
+              "forward command remained zero after handover");
       if (state.policySwitch().zeroCommand() && state.flatHistory().ready() &&
           state.flatHistory().latest().time_us == time)
         check(state.flatHistory().latest().command.norm() == 0.f, "switch failed to command zero");
@@ -136,6 +141,8 @@ int main() {
         state.policySwitch().phase() == Phase::Running, "flat -> stairs failed");
   check(state.stairsRunner().timingSummary(&timing) && timing.count > 0,
         "stairs never ran inference");
+  step(1200); // Exercise the full two-second post-handover diagnostic window.
+
   check(std::fabs(legs.commands[0].kpJoint(0, 0) - 20.f) < 1e-6f, "HIM real robot gains changed");
   estimate.vBody.setZero(); estimate.omegaBody.setZero();
   for (int leg = 0; leg < 4; ++leg) legs.datas[leg].qd.setZero();

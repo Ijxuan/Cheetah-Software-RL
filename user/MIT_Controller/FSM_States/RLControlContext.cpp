@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <iostream>
 
 #include <Configuration.h>
@@ -273,7 +274,13 @@ void RLControlContext<T>::runAtTime(RLController owner, int64_t now_us) {
     if (owner == RLController::Flat) runFlatPolicy(now_us);
     else runOnnxPolicy(now_us);
     _lastPolicyRunTimeUs = now_us;
+    const bool was_blending = _switch.phase() == RLPolicySwitch::Phase::Blending;
     if (!_emergencyStop) _switch.finishBlend(now_us, _blendTargetReached);
+    if (!_emergencyStop && was_blending &&
+        _switch.phase() != RLPolicySwitch::Phase::Blending) {
+      _inputDebugStartUs = _inputDebugNextUs = now_us;
+      _inputDebugUntilUs = now_us + 2000000;
+    }
   }
   reportSwitch();
   if (_emergencyStop) {
@@ -301,6 +308,7 @@ bool RLControlContext<T>::updateHistories(int64_t now_us) {
   sample.qd = readRobotQd();
   sample.applied_target = _lastTargetQRobot;
   sample.command = readVelocityCommand();
+  reportPostSwitchInput(now_us, sample.command);
   for (int leg = 0; leg < 4; ++leg) {
     sample.feet.segment<3>(leg * 3) = this->_data->_quadruped->getHipLocation(leg) +
         this->_data->_legController->datas[leg].p;
@@ -397,8 +405,33 @@ void RLControlContext<T>::reportSwitch() {
 }
 
 template <typename T>
+void RLControlContext<T>::reportPostSwitchInput(int64_t now_us, const Vec3f& command) {
+  if (now_us >= _inputDebugUntilUs || now_us < _inputDebugNextUs) return;
+  _inputDebugNextUs = now_us + 100000; // 10 Hz, at most 20 lines per handover.
+  const auto& rc = *this->_data->_desiredStateCommand->rcCommand;
+  const auto& d = rc.input_diagnostics;
+  const char* nav_names[] = {"manual", "waiting", "active", "stale", "timed_out"};
+  const char* nav = d.navigation_state >= 0 && d.navigation_state < 5 ?
+      nav_names[d.navigation_state] : "unknown";
+  std::printf("[RLInput] t=%.3fs active=%s phase=%s use_rc=%d "
+              "js_valid=%d event=%llu age_ms=%.1f raw_l=(%d,%d) raw_rx=%d RB=%d RT=%d "
+              "manual=(%.4f,%.4f,%.4f) nav=%s rc_mode=%.0f "
+              "rc=(%.4f,%.4f,%.4f) zero_gate=%d deadband=%.2f "
+              "policy_cmd=(%.4f,%.4f,%.4f)\n",
+      (now_us - _inputDebugStartUs) / 1e6, rlControllerName(_switch.active()),
+      RLPolicySwitch::phaseName(_switch.phase()), int(_data->controlParameters->use_rc),
+      int(d.joystick_valid), static_cast<unsigned long long>(d.event_sequence),
+      d.event_age_ms, d.lx, d.ly, d.rx, d.rb, d.rt,
+      -d.ly / 32768., -.5 * d.lx / 32768., -d.rx / 32768., nav, rc.mode,
+      rc.v_des[0], rc.v_des[1], rc.omega_des[2], int(_switch.zeroCommand()),
+      _switch.active() == RLController::Flat ? .1 : .05,
+      double(command[0]), double(command[1]), double(command[2]));
+}
+
+template <typename T>
 void RLControlContext<T>::stop() {
   _sessionActive = false;
+  _inputDebugUntilUs = 0;
   this->_data->_legController->setEnabled(false);
   _flatHistory.reset();
   _onnxRunner->resetObservationHistory();

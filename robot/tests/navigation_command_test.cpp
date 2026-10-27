@@ -129,6 +129,28 @@ int main() {
   get_rc_control_settings(&out);
   check(out.mode == RC_mode::RL_FLAT && near(out.v_des[0], .5),
         "recovery retained navigation or START failed from recovery");
+  // Keep LY held through repeated mode changes: button/RX events must not
+  // erase it, even when no new LY event arrives from the joystick driver.
+  axis(0, 7252); axis(1, 2849); axis(3, 0);
+  for (int i = 0; i < 12; ++i) {
+    const unsigned char select = i % 2 ? 6 : 7;
+    button(select, 1); button(select, 0);
+    axis(3, i % 2 ? 12000 : -12000);
+    get_rc_control_settings(&out);
+    check(out.input_diagnostics.joystick_valid &&
+          out.input_diagnostics.lx == 7252 && out.input_diagnostics.ly == 2849 &&
+          out.input_diagnostics.rx == (i % 2 ? 12000 : -12000) &&
+          out.input_diagnostics.navigation_state == 0 &&
+          out.input_diagnostics.event_age_ms >= 0.,
+          "input diagnostics did not match the manual RC snapshot");
+    check(near(out.v_des[0], -2849. / 32768.) &&
+          near(out.v_des[1], -.5 * 7252. / 32768.),
+          "held left stick was lost during mode/right-stick changes");
+  }
+  axis(1, -18392); get_rc_control_settings(&out);
+  check(near(out.v_des[0], 18392. / 32768.), "forward input stayed latched at zero");
+  axis(1, 18392); get_rc_control_settings(&out);
+  check(near(out.v_des[0], -18392. / 32768.), "reverse input stayed latched at zero");
   button(5, 1); set_cmd_vel_command(.3, 0);
   axis(2, 32767); button(1, 1); button(1, 0); axis(2, 0); // LT+B
   get_rc_control_settings(&out);

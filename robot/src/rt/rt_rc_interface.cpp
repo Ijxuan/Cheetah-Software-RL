@@ -12,6 +12,7 @@ static std::mutex lcm_get_set_mutex;
 // Controller Settings
 rc_control_settings rc_control;
 static NavigationCommand navigation;
+static double last_joystick_event_time = 0.;
 
 static double navigation_time()
 {
@@ -41,6 +42,10 @@ void get_rc_control_settings(void *settings)
         snapshot.omega_des[0] = snapshot.omega_des[1] = 0.;
         snapshot.omega_des[2] = wz;
     }
+    snapshot.input_diagnostics.navigation_state = static_cast<int>(navigation.state());
+    if (snapshot.input_diagnostics.joystick_valid)
+        snapshot.input_diagnostics.event_age_ms =
+            (navigation_time() - last_joystick_event_time) * 1000.;
     static NavigationCommand::State reported = NavigationCommand::State::Manual;
     if (reported != navigation.state()) {
         reported = navigation.state();
@@ -310,6 +315,13 @@ void js_complete(int port)
         return;
 
     std::lock_guard<std::mutex> lock(lcm_get_set_mutex);
+
+    auto& diagnostic = rc_control.input_diagnostics;
+    diagnostic.joystick_valid = true;
+    diagnostic.lx = map.lx; diagnostic.ly = map.ly; diagnostic.rx = map.rx;
+    diagnostic.rb = map.rb; diagnostic.rt = map.rt;
+    ++diagnostic.event_sequence;
+    last_joystick_event_time = navigation_time();
 
     if (++js_print_count >= 100)
     {

@@ -7,6 +7,15 @@
 #include <chrono>
 #include "RLControllerSelection.h"
 
+// Captured with the same lock/snapshot as the RC velocity used by the controller.
+struct rc_input_diagnostics {
+    bool joystick_valid = false;
+    int lx = 0, ly = 0, rx = 0, rb = 0, rt = 0;
+    uint64_t event_sequence = 0;
+    double event_age_ms = -1.;
+    int navigation_state = 0; // NavigationCommand::State
+};
+
 class rc_control_settings {
   public:
     double     mode;
@@ -18,6 +27,7 @@ class rc_control_settings {
     double     variable[3];
     double     step_height;
     uint64_t rl_selection_sequence = 0;
+    rc_input_diagnostics input_diagnostics;
 };
 
 // Thread-safe navigation input; only accepted after RB arms RL navigation.
