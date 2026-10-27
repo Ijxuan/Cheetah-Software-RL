@@ -308,7 +308,8 @@ bool RLControlContext<T>::updateHistories(int64_t now_us) {
   sample.qd = readRobotQd();
   sample.applied_target = _lastTargetQRobot;
   sample.command = readVelocityCommand();
-  reportPostSwitchInput(now_us, sample.command);
+  // Uncomment to enable detailed joystick diagnostics for 2 s after handover.
+  // reportPostSwitchInput(now_us, sample.command);
   for (int leg = 0; leg < 4; ++leg) {
     sample.feet.segment<3>(leg * 3) = this->_data->_quadruped->getHipLocation(leg) +
         this->_data->_legController->datas[leg].p;

@@ -173,7 +173,8 @@ ctest --output-on-failure -R 'navigation_command|legged_gym_rl_policy_config|him
 
 ### 切换后手柄诊断
 
-每次 RL 状态交接的 blending 结束后，自动打印 2 秒 `[RLInput]`，频率 10 Hz，
+详细日志默认关闭；取消 `RLControlContext.cpp` 中 `reportPostSwitchInput` 调用的注释即可启用。
+启用后，每次 RL 状态交接的 blending 结束后，自动打印 2 秒 `[RLInput]`，频率 10 Hz，
 每次最多 20 行；退出 RL 后停止。新一次交接完成会重新开始计时。
 `raw_l=(lx,ly)`、`raw_rx`、`RB/RT` 是与 RC 指令同一快照中的手柄数据；
 `event` 为事件计数，`age_ms` 为最近手柄事件距快照的时间（保持推杆时不产生新事件是正常的）。
