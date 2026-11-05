@@ -1,4 +1,5 @@
 #include <rt/NavigationCommand.h>
+#include <rt/NavigationGaitFilter.h>
 #include <rt/rt_rc_interface.h>
 #include "RapidRLBuildConfig.h"
 #include <linux/joystick.h>
@@ -16,6 +17,41 @@ static void check(bool ok, const char* message) {
 static bool near(double a, double b) { return std::fabs(a - b) < 1e-6; }
 
 int main() {
+  // Deterministic boundary tests: no real delay or motor/controller required.
+  NavigationGaitFilter filter;
+  using GaitResult = NavigationGaitFilter::Result;
+  for (int i = 1; i <= 4; ++i)
+    check(filter.receive(53, i * .01) == GaitResult::Confirming &&
+          filter.confirmations() == i, "gait triggered before five confirmations");
+  check(filter.receive(54, .05) == GaitResult::Confirming && filter.confirmations() == 1,
+        "target change did not reset confirmations");
+  check(filter.receive(53, .06) == GaitResult::Confirming && filter.confirmations() == 1,
+        "alternating target accumulated confirmations");
+  for (int i = 0; i < 4; ++i) filter.receive(53, .07 + i * .01);
+  check(filter.confirmations() == 5, "fifth confirmation missing");
+  filter.handover(true, false, .2);
+  check(filter.receive(54, 10.) == GaitResult::Switching &&
+        filter.remainingCooldown(10.) == 0., "cooldown started before completion");
+  filter.handover(false, true, 10.);
+  check(near(filter.remainingCooldown(10.), 2.), "cooldown is not two seconds");
+  check(filter.receive(54, 11.999) == GaitResult::CoolingDown &&
+        filter.confirmations() == 0, "cooldown request accumulated confirmations");
+  check(filter.receive(54, 12.) == GaitResult::Confirming && filter.confirmations() == 1,
+        "cooldown boundary did not require fresh confirmations");
+  check(filter.receive(54, 13.) == GaitResult::Confirming && filter.confirmations() == 1,
+        "one-second message gap did not reset confirmations");
+  for (int i = 0; i < 3; ++i) filter.receive(54, 13.01 + i * .01);
+  check(filter.receive(54, 13.04) == GaitResult::Ready, "fresh fifth confirmation not ready");
+  filter.requestSubmitted();
+  check(filter.receive(53, 13.05) == GaitResult::Switching, "pending request not protected");
+  filter.manualSelection();
+  check(filter.receive(53, 13.06) == GaitResult::Confirming,
+        "manual cancellation before FSM pickup left navigation stuck");
+  filter.handover(true, false, 13.07);
+  filter.manualSelection();
+  check(filter.receive(53, 13.08) == GaitResult::Switching,
+        "manual selection incorrectly cleared actual handover protection");
+
   NavigationCommand nav;
   double vx, wz;
   check(!nav.receive(.2, .1, 0), "manual must ignore packets");
@@ -181,7 +217,26 @@ int main() {
         "invalid gait accepted");
   const auto change_result = NAVIGATION_CONTROLLER_SWITCH_ENABLED ?
       NavigationGaitResult::Requested : NavigationGaitResult::PrintOnly;
-  check(set_navigation_gait_command(1) == change_result,
+  NavigationGaitDiagnostics gait_diagnostics;
+  // Partial confirmations are discarded by invalid packets and same-mode packets.
+  check(set_navigation_gait_command(1) == NavigationGaitResult::Confirming,
+        "first packet bypassed confirmation");
+  check(set_navigation_gait_command(-1) == NavigationGaitResult::Invalid,
+        "invalid packet accepted");
+  check(set_navigation_gait_command(2, &gait_diagnostics) == NavigationGaitResult::Confirming &&
+        gait_diagnostics.confirmations == 1, "invalid packet did not clear streak");
+  check(set_navigation_gait_command(0) == NavigationGaitResult::AlreadyRequested,
+        "same-mode request not recognized");
+  for (int i = 1; i <= 4; ++i) {
+    check(set_navigation_gait_command(i % 2 ? 1 : 2, &gait_diagnostics) ==
+          NavigationGaitResult::Confirming && gait_diagnostics.confirmations == i,
+          "up/down packets did not share five-count confirmation");
+    get_rc_control_settings(&out);
+    check(out.mode == RC_mode::RL_FLAT && out.rl_selection_sequence == nav_sequence,
+          "unconfirmed request changed RC selection");
+  }
+  check(set_navigation_gait_command(1, &gait_diagnostics) == change_result &&
+        gait_diagnostics.confirmations == 5,
         "upstairs request did not respect compile switch");
   get_rc_control_settings(&out);
   check(out.mode == (NAVIGATION_CONTROLLER_SWITCH_ENABLED ? RC_mode::RL_STAIRS : RC_mode::RL_FLAT) &&
@@ -190,14 +245,30 @@ int main() {
         "gait request changed the wrong RC state or lost waiting navigation");
   nav_sequence = out.rl_selection_sequence;
   check(set_navigation_gait_command(2) == (NAVIGATION_CONTROLLER_SWITCH_ENABLED ?
-        NavigationGaitResult::AlreadyRequested : NavigationGaitResult::PrintOnly),
+        NavigationGaitResult::AlreadyRequested : NavigationGaitResult::Confirming),
         "downstairs did not share the stairs controller");
   check(set_navigation_gait_command(1) == (NAVIGATION_CONTROLLER_SWITCH_ENABLED ?
-        NavigationGaitResult::AlreadyRequested : NavigationGaitResult::PrintOnly),
+        NavigationGaitResult::AlreadyRequested : NavigationGaitResult::Confirming),
         "repeated stairs request retried handover");
   get_rc_control_settings(&out);
   check(out.rl_selection_sequence == nav_sequence, "duplicate gait advanced sequence");
+  if (NAVIGATION_CONTROLLER_SWITCH_ENABLED) {
+    check(set_navigation_gait_command(0) == NavigationGaitResult::Switching,
+          "opposite request queued during handover");
+  }
+  // Completion feedback is independent of the compile flag (manual handovers too).
+  update_navigation_handover(false, true);
+  const int opposite = NAVIGATION_CONTROLLER_SWITCH_ENABLED ? 0 : 1;
+  check(set_navigation_gait_command(opposite, &gait_diagnostics) == NavigationGaitResult::CoolingDown &&
+        gait_diagnostics.cooldown_remaining > 1.9 && gait_diagnostics.confirmations == 0,
+        "completed handover did not reject requests for two seconds");
+  std::this_thread::sleep_for(std::chrono::milliseconds(2050));
   set_cmd_vel_command(.3, .1);
+  if (NAVIGATION_CONTROLLER_SWITCH_ENABLED) {
+    for (int i = 0; i < 4; ++i)
+      check(set_navigation_gait_command(0) == NavigationGaitResult::Confirming,
+            "cooldown packets leaked into confirmation count");
+  }
   check(set_navigation_gait_command(0) == (NAVIGATION_CONTROLLER_SWITCH_ENABLED ?
         NavigationGaitResult::Requested : NavigationGaitResult::AlreadyRequested),
         "flat gait was not mapped to flat controller");
@@ -207,10 +278,18 @@ int main() {
         near(out.v_des[0], .3) && near(out.omega_des[2], .1),
         "flat request lost navigation velocity or mutated print-only selection");
   // Prove DOWN by itself can select stairs, not only follow an UP packet.
+  // End the previous pending request without creating a synthetic cooldown.
+  update_navigation_handover(false);
+  for (int i = 0; i < 4; ++i)
+    check(set_navigation_gait_command(2) == NavigationGaitResult::Confirming,
+          "downstairs bypassed confirmation");
   check(set_navigation_gait_command(2) == change_result, "downstairs did not request stairs");
   get_rc_control_settings(&out);
   check(out.mode == (NAVIGATION_CONTROLLER_SWITCH_ENABLED ? RC_mode::RL_STAIRS : RC_mode::RL_FLAT),
         "downstairs selected wrong controller");
+  button(7, 1); button(7, 0); // cancel before the real FSM consumes the request
+  check(set_navigation_gait_command(2) == NavigationGaitResult::Confirming,
+        "manual cancellation left a pending navigation request stuck");
   axis(5, 20000); // RT returns to manual and blocks terrain requests.
   check(set_navigation_gait_command(0) == NavigationGaitResult::NavigationInactive,
         "navigation gait defeated RT takeover");

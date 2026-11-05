@@ -135,12 +135,19 @@ int main() {
   step(150);
   check(state.policySwitch().active() == RLController::Flat &&
         state.policySwitch().phase() == Phase::Stopping, "switched at angular-speed limit");
+  check(get_navigation_gait_diagnostics().switching &&
+        get_navigation_gait_diagnostics().cooldown_remaining == 0.,
+        "navigation cooldown started before actual handover completion");
   estimate.omegaBody[0] = .19f;
   estimate.vBody[0] = .3f;
   for (int leg = 0; leg < 4; ++leg) legs.datas[leg].qd.setConstant(.8f);
   step(450);
   check(state.policySwitch().active() == RLController::Stairs &&
         state.policySwitch().phase() == Phase::Running, "flat -> stairs failed");
+  const auto navigation_status = get_navigation_gait_diagnostics();
+  check(!navigation_status.switching && navigation_status.cooldown_remaining > 0. &&
+        navigation_status.cooldown_remaining <= 2.,
+        "actual FSM blend completion did not start navigation cooldown");
   check(state.stairsRunner().timingSummary(&timing) && timing.count > 0,
         "stairs never ran inference");
   rc.v_des[0] = .9; step(50);

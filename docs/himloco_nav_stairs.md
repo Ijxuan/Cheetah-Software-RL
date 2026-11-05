@@ -134,13 +134,24 @@ cmake --build build-onnx --target mit_ctrl -j2
 楼梯消息不刷新速度超时，也不恢复导航；未受理的请求不缓存，重新启用后需新消息。
 
 目标与当前请求模式相同则不重复生成请求，上楼与下楼之间变化也不重复请求。
-开关为 0 时不会写入模式或请求序号，日志中“满足请求条件”会随每条消息重复打印。
+连续收到同一控制器目标 **5 次**才满足请求条件；上楼与下楼均计为楼梯目标。
+目标变化、无效消息、消息间隔达到 1 秒、导航退出/超时、重新按 RB 或手动选择
+模式时清空确认次数。前 4 次会打印“拒绝切换：连续确认不足5次”和 `confirm=N/5`。
+
+交接中拒绝新的导航切换请求，不排队；实际目标/增益交接完成后开始 **2 秒冷却**。
+冷却期间打印“拒绝切换：交接后冷却未满2秒”和 `cooldown_remaining`（剩余秒数），
+不累计确认，冷却结束后仍需新的连续 5 次确认。手柄切换也会在完成后启动导航冷却，
+但手柄和急停不受这两项导航请求限制。
+
+开关为 0 时不会写入模式或请求序号，每累计 5 次打印一次“满足请求条件”后重新计数。
+没有真实交接就不会启动冷却；可先验证连续计数，再启用开关测试实际交接后的冷却。
 开关为 1 时只更新请求模式和请求序号，后续由现有 FSM 执行停稳、模型可用性检查
 及目标/增益交接。“已提交切换请求”不代表实际完成，需观察 `[DualRL] active=...`
 或 `rl_robot_state.mode`。交接超时后同目标消息不会自动重试，可用原手柄选择键重试。
 
 ```text
-[Navigation] channel=STAIR_STATE_LCM 请求步态=上楼梯 gait=1 state=1 is_stairs=1 distance=1.250 m slope=0.200000 target=楼梯(53) switch_enabled=0 action=仅打印：满足请求条件，未提交切换
+[Navigation] channel=STAIR_STATE_LCM 请求步态=上楼梯 gait=1 state=1 is_stairs=1 distance=1.250 m slope=0.200000 target=楼梯(53) switch_enabled=0 confirm=3/5 cooldown_remaining=0.000 s action=拒绝切换：连续确认不足5次
+[Navigation] channel=STAIR_STATE_LCM 请求步态=平地 gait=0 state=0 is_stairs=0 distance=-1.000 m slope=0.000000 target=平地(54) switch_enabled=1 confirm=0/5 cooldown_remaining=1.650 s action=拒绝切换：交接后冷却未满2秒
 ```
 
 ## 操作与状态
@@ -213,11 +224,13 @@ ctest --output-on-failure -R 'navigation_command|legged_gym_rl_policy_config|him
 验证独立更新、限幅、无效数据、长按、接管、实际 1/3 秒超时和 OFF 恢复。
 测试不启动硬件桥、不发布 LCM 运动指令、不驱动电机。
 `navigation_command` 还覆盖导航步态到双控制器的映射、重复请求、RB/RT/OFF 门控
-及速度超时。分别以开关为 0 和 1 编译运行，可验证仅打印与提交请求两个分支。
+及速度超时，并覆盖连续 5 次确认、目标波动/断流清零、2 秒冷却边界、交接中拒绝
+及手柄取消待处理请求。分别以开关为 0 和 1 编译运行，可验证仅打印与提交请求两个分支。
 `dual_rl_policy` 对照旧平地的观测布局及模型输出，并验证 HIM 历史更新与推理拆分
 前后的输出一致性。`dual_rl_controller` 用真实模型和注入的时间/机器人状态调用
 生产 `ControlFSM.runFSM()`，覆盖真实状态身份、跨状态历史连续性、两个方向的
-交接、停稳超时、重试、增益、交接中恢复站立/OFF 中断以及 GUI 模式 53/54。
+交接、停稳超时、重试、增益、交接中恢复站立/OFF 中断以及 GUI 模式 53/54，
+并验证导航冷却由实际交接完成事件启动。
 测试链接与 `mit_ctrl` 相同的 `mit_controller_core`，注入状态注册表以避免启动
 无关的视觉订阅线程；RL/恢复站立/Passive 状态和 FSM 调度均使用生产代码。
 该测试关闭虚拟机器人调试状态发布，但现有 FSM 基类初始化 LCM 仍要求环境允许

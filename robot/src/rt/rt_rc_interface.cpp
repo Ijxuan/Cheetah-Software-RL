@@ -1,5 +1,6 @@
 #include <mutex>
 #include <rt/NavigationCommand.h>
+#include <rt/NavigationGaitFilter.h>
 #include <rt/rt_rc_interface.h>
 #include "Utilities/EdgeTrigger.h"
 #include <string.h> // memcpy
@@ -13,6 +14,7 @@ static std::mutex lcm_get_set_mutex;
 // Controller Settings
 rc_control_settings rc_control;
 static NavigationCommand navigation;
+static NavigationGaitFilter navigation_gait;
 static double last_joystick_event_time = 0.;
 
 static double navigation_time()
@@ -28,26 +30,71 @@ void set_cmd_vel_command(double vx, double wz)
         navigation.receive(vx, wz, navigation_time());
 }
 
-NavigationGaitResult set_navigation_gait_command(int gait)
+NavigationGaitDiagnostics get_navigation_gait_diagnostics()
 {
     std::lock_guard<std::mutex> lock(lcm_get_set_mutex);
-    if (gait < 0 || gait > 2) return NavigationGaitResult::Invalid;
-    if (!RC_mode::isRL(rc_control.mode)) return NavigationGaitResult::NotInRL;
+    NavigationGaitDiagnostics diagnostics;
+    diagnostics.confirmations = navigation_gait.confirmations();
+    diagnostics.cooldown_remaining = navigation_gait.remainingCooldown(navigation_time());
+    diagnostics.switching = navigation_gait.switching();
+    return diagnostics;
+}
+
+void update_navigation_handover(bool switching, bool completed)
+{
+    std::lock_guard<std::mutex> lock(lcm_get_set_mutex);
+    navigation_gait.handover(switching, completed, navigation_time());
+    if (completed)
+        printf("[Navigation] 控制器交接完成，导航切换冷却开始：2.000 s\n");
+}
+
+NavigationGaitResult set_navigation_gait_command(int gait, NavigationGaitDiagnostics* diagnostics)
+{
+    std::lock_guard<std::mutex> lock(lcm_get_set_mutex);
+    if (diagnostics) *diagnostics = NavigationGaitDiagnostics{};
+    if (gait < 0 || gait > 2) {
+        navigation_gait.resetConfirmation();
+        return NavigationGaitResult::Invalid;
+    }
+    if (!RC_mode::isRL(rc_control.mode)) {
+        navigation_gait.resetConfirmation();
+        return NavigationGaitResult::NotInRL;
+    }
 
     // Tick existing velocity timeout without refreshing it with terrain packets.
     double vx = 0., wz = 0.;
-    navigation.sample(navigation_time(), &vx, &wz);
+    const double now = navigation_time();
+    navigation.sample(now, &vx, &wz);
     if (navigation.state() != NavigationCommand::State::Waiting &&
-        navigation.state() != NavigationCommand::State::Active)
+        navigation.state() != NavigationCommand::State::Active) {
+        navigation_gait.resetConfirmation();
         return NavigationGaitResult::NavigationInactive;
+    }
 
     const int target = gait == 0 ? RC_mode::RL_FLAT : RC_mode::RL_STAIRS;
     // mode is the requested controller, not necessarily the active FSM state.
     // Deduplicate against it so repeated packets do not retry blocked handovers.
-    if (rc_control.mode == target) return NavigationGaitResult::AlreadyRequested;
+    if (rc_control.mode == target) {
+        navigation_gait.resetConfirmation();
+        return NavigationGaitResult::AlreadyRequested;
+    }
+    const auto result = navigation_gait.receive(target, now);
+    if (diagnostics) {
+        diagnostics->confirmations = navigation_gait.confirmations();
+        diagnostics->cooldown_remaining = navigation_gait.remainingCooldown(now);
+        diagnostics->switching = navigation_gait.switching();
+    }
+    switch (result) {
+        case NavigationGaitFilter::Result::Confirming: return NavigationGaitResult::Confirming;
+        case NavigationGaitFilter::Result::CoolingDown: return NavigationGaitResult::CoolingDown;
+        case NavigationGaitFilter::Result::Switching: return NavigationGaitResult::Switching;
+        case NavigationGaitFilter::Result::Ready: break;
+    }
+    navigation_gait.resetConfirmation();
 #if NAVIGATION_CONTROLLER_SWITCH_ENABLED
     ++rc_control.rl_selection_sequence;
     rc_control.mode = target;
+    navigation_gait.requestSubmitted();
     return NavigationGaitResult::Requested;
 #else
     return NavigationGaitResult::PrintOnly;
@@ -70,6 +117,9 @@ void get_rc_control_settings(void *settings)
         snapshot.omega_des[2] = wz;
     }
     snapshot.input_diagnostics.navigation_state = static_cast<int>(navigation.state());
+    if (navigation.state() != NavigationCommand::State::Waiting &&
+        navigation.state() != NavigationCommand::State::Active)
+        navigation_gait.resetConfirmation();
     if (snapshot.input_diagnostics.joystick_valid)
         snapshot.input_diagnostics.event_age_ms =
             (navigation_time() - last_joystick_event_time) * 1000.;
@@ -88,6 +138,7 @@ void request_rc_off()
     std::lock_guard<std::mutex> lock(lcm_get_set_mutex);
     rc_control.mode = RC_mode::OFF;
     navigation.cancel();
+    navigation_gait.handover(false, false, navigation_time());
     for (int i = 0; i < 3; ++i) {
         rc_control.v_des[i] = 0.;
         rc_control.omega_des[i] = 0.;
@@ -336,6 +387,7 @@ void js_complete(int port)
 {
     const bool previous_start = map.start;
     const bool previous_back = map.back;
+    const bool previous_rb = map.rb;
     int len = xbox_map_read(port, &map);
     if (len < 0)
         return;
@@ -376,6 +428,7 @@ void js_complete(int port)
              ((map.back && !previous_back) || (map.start && !previous_start))) {
         // BACK wins if both are pressed. Held buttons never retry a switch.
         ++rc_control.rl_selection_sequence;
+        navigation_gait.manualSelection();
         rc_control.mode = map.back ? RC_mode::RL_STAIRS : RC_mode::RL_FLAT;
     }
     else if (rc_control.mode == RC_mode::QP_STAND)
@@ -389,8 +442,13 @@ void js_complete(int port)
         rc_control.omega_des[1] = 0;
         rc_control.omega_des[2] = 0;
     }
+    const auto previous_navigation_state = navigation.state();
     navigation.buttons(RC_mode::isRL(rc_control.mode),
                        map.rb, map.rt > 15000, navigation_time());
+    if ((map.rb && !previous_rb) || navigation.state() != previous_navigation_state ||
+        navigation.state() == NavigationCommand::State::Manual)
+        navigation_gait.resetConfirmation();
+    if (!RC_mode::isRL(rc_control.mode)) navigation_gait.manualSelection();
     if (RC_mode::isRL(rc_control.mode)) {
         // Always refresh manual input. Navigation overrides only the snapshot,
         // so RT takes effect on this event without retaining a navigation speed.

@@ -34,11 +34,21 @@ class rc_control_settings {
 void set_cmd_vel_command(double vx, double wz);
 
 enum class NavigationGaitResult {
-    Invalid, NotInRL, NavigationInactive, AlreadyRequested, PrintOnly, Requested
+    Invalid, NotInRL, NavigationInactive, AlreadyRequested, PrintOnly, Requested,
+    Confirming, CoolingDown, Switching
+};
+struct NavigationGaitDiagnostics {
+    int confirmations = 0;
+    double cooldown_remaining = 0.;
+    bool switching = false;
 };
 // Thread-safe, uses the same navigation ownership and RC lock as velocity input.
 // gait: 0=flat, 1/2=stairs. Does not arm navigation or enter RL from stand/OFF.
-NavigationGaitResult set_navigation_gait_command(int gait);
+NavigationGaitResult set_navigation_gait_command(
+    int gait, NavigationGaitDiagnostics* diagnostics = nullptr);
+// Called by the FSM on phase changes. Only actual blend completion starts cooldown.
+void update_navigation_handover(bool switching, bool completed = false);
+NavigationGaitDiagnostics get_navigation_gait_diagnostics();
 
 
 namespace RC_mode{

@@ -398,6 +398,11 @@ void RLControlContext<T>::leave(bool to_rl) {
 template <typename T>
 void RLControlContext<T>::reportSwitch() {
   if (_reportedPhase == _switch.phase() && _reportedController == _switch.active()) return;
+  const bool completed = _reportedPhase == RLPolicySwitch::Phase::Blending &&
+      _switch.phase() != RLPolicySwitch::Phase::Blending;
+  const bool switching = _switch.phase() != RLPolicySwitch::Phase::Running &&
+      _switch.phase() != RLPolicySwitch::Phase::Blocked;
+  update_navigation_handover(switching, completed);
   _reportedPhase = _switch.phase();
   _reportedController = _switch.active();
   std::cout << "[DualRL] active=" << rlControllerName(_switch.active())
@@ -431,6 +436,7 @@ void RLControlContext<T>::reportPostSwitchInput(int64_t now_us, const Vec3f& com
 
 template <typename T>
 void RLControlContext<T>::stop() {
+  update_navigation_handover(false);
   _sessionActive = false;
   _inputDebugUntilUs = 0;
   this->_data->_legController->setEnabled(false);

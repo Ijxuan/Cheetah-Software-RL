@@ -149,7 +149,8 @@ void HardwareBridge::handleStairStateLCM(const lcm::ReceiveBuffer* rbuf,
     case 1: requestedGait = "上楼梯"; break;
     case 2: requestedGait = "下楼梯"; break;
   }
-  const auto result = set_navigation_gait_command(msg->gait);
+  NavigationGaitDiagnostics diagnostics;
+  const auto result = set_navigation_gait_command(msg->gait, &diagnostics);
   const char* action = "无效步态，忽略";
   switch (result) {
     case NavigationGaitResult::Invalid: break;
@@ -158,14 +159,19 @@ void HardwareBridge::handleStairStateLCM(const lcm::ReceiveBuffer* rbuf,
     case NavigationGaitResult::AlreadyRequested: action = "目标已请求，无需重复请求"; break;
     case NavigationGaitResult::PrintOnly: action = "仅打印：满足请求条件，未提交切换"; break;
     case NavigationGaitResult::Requested: action = "已提交切换请求，等待现有交接流程"; break;
+    case NavigationGaitResult::Confirming: action = "拒绝切换：连续确认不足5次"; break;
+    case NavigationGaitResult::CoolingDown: action = "拒绝切换：交接后冷却未满2秒"; break;
+    case NavigationGaitResult::Switching: action = "拒绝切换：控制器正在交接，不缓存请求"; break;
   }
   const char* target = msg->gait == 0 ? "平地(54)" :
                        (msg->gait == 1 || msg->gait == 2 ? "楼梯(53)" : "无效");
   printf("[Navigation] channel=%s 请求步态=%s gait=%d state=%d is_stairs=%d "
-         "distance=%.3f m slope=%.6f target=%s switch_enabled=%d action=%s\n",
+         "distance=%.3f m slope=%.6f target=%s switch_enabled=%d "
+         "confirm=%d/5 cooldown_remaining=%.3f s action=%s\n",
          chan.c_str(), requestedGait, static_cast<int>(msg->gait),
          static_cast<int>(msg->state), static_cast<int>(msg->is_stairs),
-         msg->distance, msg->slope, target, NAVIGATION_CONTROLLER_SWITCH_ENABLED, action);
+         msg->distance, msg->slope, target, NAVIGATION_CONTROLLER_SWITCH_ENABLED,
+         diagnostics.confirmations, diagnostics.cooldown_remaining, action);
 }
 
 /*!
