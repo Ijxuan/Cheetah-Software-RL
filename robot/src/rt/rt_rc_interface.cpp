@@ -7,6 +7,7 @@
 #include <rt/rt_sbus.h>
 #include <algorithm>
 #include <cmath>
+#include "RapidRLBuildConfig.h"
 static std::mutex lcm_get_set_mutex;
 
 // Controller Settings
@@ -25,6 +26,32 @@ void set_cmd_vel_command(double vx, double wz)
     std::lock_guard<std::mutex> lock(lcm_get_set_mutex);
     if (RC_mode::isRL(rc_control.mode))
         navigation.receive(vx, wz, navigation_time());
+}
+
+NavigationGaitResult set_navigation_gait_command(int gait)
+{
+    std::lock_guard<std::mutex> lock(lcm_get_set_mutex);
+    if (gait < 0 || gait > 2) return NavigationGaitResult::Invalid;
+    if (!RC_mode::isRL(rc_control.mode)) return NavigationGaitResult::NotInRL;
+
+    // Tick existing velocity timeout without refreshing it with terrain packets.
+    double vx = 0., wz = 0.;
+    navigation.sample(navigation_time(), &vx, &wz);
+    if (navigation.state() != NavigationCommand::State::Waiting &&
+        navigation.state() != NavigationCommand::State::Active)
+        return NavigationGaitResult::NavigationInactive;
+
+    const int target = gait == 0 ? RC_mode::RL_FLAT : RC_mode::RL_STAIRS;
+    // mode is the requested controller, not necessarily the active FSM state.
+    // Deduplicate against it so repeated packets do not retry blocked handovers.
+    if (rc_control.mode == target) return NavigationGaitResult::AlreadyRequested;
+#if NAVIGATION_CONTROLLER_SWITCH_ENABLED
+    ++rc_control.rl_selection_sequence;
+    rc_control.mode = target;
+    return NavigationGaitResult::Requested;
+#else
+    return NavigationGaitResult::PrintOnly;
+#endif
 }
 
 /* ------------------------- HANDLERS ------------------------- */

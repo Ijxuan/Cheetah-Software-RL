@@ -33,6 +33,7 @@ set(RAPID_RL_WARMUP_ITERS "20" CACHE STRING "Warmup iterations before running th
 set(RAPID_RL_MAX_INFERENCE_MS "20.0" CACHE STRING "Soft warning threshold for one rapid RL inference")
 set(RAPID_RL_ONNX_NUM_THREADS "1" CACHE STRING "ONNX Runtime intra-op CPU thread count for rapid RL inference")
 option(RAPID_RL_DEBUG_LCM_STATE "Publish read-only rl_robot_state LCM debug state" ON)
+option(NAVIGATION_CONTROLLER_SWITCH_ENABLED "Allow navigation gait requests to select flat/stairs controllers (OFF logs only)" OFF)
 set(RAPID_RL_ETHERCAT_CPU_CORE "0" CACHE STRING "Dedicated logical CPU for the EtherCAT task")
 set(RAPID_RL_ETHERCAT_RT_PRIORITY "99" CACHE STRING "SCHED_FIFO priority for EtherCAT (1-99)")
 

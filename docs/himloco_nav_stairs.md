@@ -2,8 +2,8 @@
 
 分支 `himloco-onnx-nav-stairs` 在上层 `ControlFSM` 中注册两个独立状态：
 Start 请求 `RL_FLAT`（54），Back 请求 `RL_STAIRS`（53）。原 `RL_JOINT_PD=53`
-保留为楼梯模式的兼容名称。导航只提供速度，切换时先停稳再交接，并保留导航
-控制权。没有自动地形识别。
+保留为楼梯模式的兼容名称。导航提供速度和可选的步态切换请求，切换时先停稳再交接，并保留导航
+控制权。导航步态请求默认仅打印；启用编译开关后通过相同的交接流程请求切换。
 
 实体罗技手柄 Start（Linux 按钮编号 7）进入平地，Back（编号 6）进入楼梯。
 十字键只记录轴 6/7 的值，没有绑定功能；手柄 Mode 键可能在设备侧互换左摇杆与十字键。
@@ -85,6 +85,64 @@ e1bcfdfd2469fed0ec8d9f36e866b6941cdfd7af3e87763efdfb78dae784871a  policy.onnx
 当前消息没有发送时间戳/序号，接收端超时以本机 steady_clock 接收时间计；
 不能识别网络中延迟送达的旧包，发送端不要积压或重放命令。
 
+### 导航步态请求与编译开关
+
+在相同 LCM URL 上订阅 `STAIR_STATE_LCM` 通道，类型为
+`lcm-types/stair_state_msg.lcm`。发送端必须使用相同的类型名、字段类型及顺序：
+`int8_t gait, state, is_stairs`，然后是 `double distance, slope`。
+修改消息后需在两端重新生成 LCM 类型；仓库现有 `scripts/make_types_no_java.sh`
+会生成该消息的 C++ 和 Python 接口。
+
+也可以在仓库根目录仅生成狗端使用的 C++ 接口：
+
+```bash
+lcm-gen -x --cpp-hpath lcm-types/cpp lcm-types/stair_state_msg.lcm
+```
+
+其他语言可在消息文件所在目录使用 `lcm-gen -p stair_state_msg.lcm`（Python）
+或 `lcm-gen -c stair_state_msg.lcm`（C）。通道名与类型名分别为
+`STAIR_STATE_LCM` 和 `stair_state_msg`。
+
+每条消息打印一行，以 `gait` 为导航请求：0=平地、1=上楼梯、2=下楼梯，
+其他值显示“无效步态”。同时原样打印 `state`、`is_stairs`、`distance`（米）
+和 `slope`（dz/ds）；`distance=-1` 表示前方没有楼梯。
+`state` 是原始检测状态，不用于覆盖 `gait`。控制器目标只由 `gait` 决定：
+0 对应平地 `RL_FLAT=54`，1 和 2 都对应楼梯 `RL_STAIRS=53`。
+`is_stairs`、`distance`、`slope` 仅作为诊断字段，不构成切换条件。
+
+编译开关 `NAVIGATION_CONTROLLER_SWITCH_ENABLED` 默认关闭。先保持为 0 测试：
+
+```bash
+cmake -S . -B build-onnx -DNAVIGATION_CONTROLLER_SWITCH_ENABLED=0
+cmake --build build-onnx --target mit_ctrl -j2
+```
+
+确认日志中的目标与触发条件稳定后，设为 1 并重新编译：
+
+```bash
+cmake -S . -B build-onnx -DNAVIGATION_CONTROLLER_SWITCH_ENABLED=1
+cmake --build build-onnx --target mit_ctrl -j2
+```
+
+开关保存在对应构建目录的 CMake 缓存中，后续普通编译会沿用；恢复只打印需显式
+重新配置为 0。启动时会打印实际编译的开关值。使用对应构建目录生成的
+`mit_ctrl` 和 `robot/librobot.so`，替换部署产物后重启进程。
+
+两种编译模式使用相同的受理条件：`use_rc: 1`，先手动进入任一 RL 模式，
+再按 RB 启用导航。导航等待首个速度包或有效速度状态下可以受理；
+速度断流满 1 秒、RT 接管、退出 RL 或 OFF 时不受理自动切换。
+楼梯消息不刷新速度超时，也不恢复导航；未受理的请求不缓存，重新启用后需新消息。
+
+目标与当前请求模式相同则不重复生成请求，上楼与下楼之间变化也不重复请求。
+开关为 0 时不会写入模式或请求序号，日志中“满足请求条件”会随每条消息重复打印。
+开关为 1 时只更新请求模式和请求序号，后续由现有 FSM 执行停稳、模型可用性检查
+及目标/增益交接。“已提交切换请求”不代表实际完成，需观察 `[DualRL] active=...`
+或 `rl_robot_state.mode`。交接超时后同目标消息不会自动重试，可用原手柄选择键重试。
+
+```text
+[Navigation] channel=STAIR_STATE_LCM 请求步态=上楼梯 gait=1 state=1 is_stairs=1 distance=1.250 m slope=0.200000 target=楼梯(53) switch_enabled=0 action=仅打印：满足请求条件，未提交切换
+```
+
 ## 操作与状态
 
 保持 `use_rc: 1`，沿用原有启动程序、策略路径和起立流程：
@@ -124,7 +182,7 @@ HIM 保持 roll/pitch 各 45° 的姿态保护；平地额外保留旧分支总�
 `rl_robot_state.mode` 平地为 54、楼梯为 53，两种策略均以 HIM 关节顺序发布 q/qd/last_action，
 平地的 last_action 是目标换算值，不能当作旧平地 actor 的原始输出。
 
-终端只在采样观察到状态变化时打印 `[Navigation]` 状态。
+导航速度状态只在采样观察到变化时打印；步态消息每条打印一行 `[Navigation]`。
 默认开启的 `rl_robot_state.command` 可用于观察经控制器限幅/死区后的最终输入。
 零速度是 HIM 的停步指令，不是机械锁止，也不等于关节失能。
 
@@ -154,6 +212,8 @@ ctest --output-on-failure -R 'navigation_command|legged_gym_rl_policy_config|him
 测试使用模拟时间覆盖边界，再使用管道模拟真实 joystick 事件调用生产 RC 接口，
 验证独立更新、限幅、无效数据、长按、接管、实际 1/3 秒超时和 OFF 恢复。
 测试不启动硬件桥、不发布 LCM 运动指令、不驱动电机。
+`navigation_command` 还覆盖导航步态到双控制器的映射、重复请求、RB/RT/OFF 门控
+及速度超时。分别以开关为 0 和 1 编译运行，可验证仅打印与提交请求两个分支。
 `dual_rl_policy` 对照旧平地的观测布局及模型输出，并验证 HIM 历史更新与推理拆分
 前后的输出一致性。`dual_rl_controller` 用真实模型和注入的时间/机器人状态调用
 生产 `ControlFSM.runFSM()`，覆盖真实状态身份、跨状态历史连续性、两个方向的

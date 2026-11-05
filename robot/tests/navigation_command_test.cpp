@@ -1,5 +1,6 @@
 #include <rt/NavigationCommand.h>
 #include <rt/rt_rc_interface.h>
+#include "RapidRLBuildConfig.h"
 #include <linux/joystick.h>
 #include <unistd.h>
 #include <chrono>
@@ -58,6 +59,8 @@ int main() {
   auto axis = [&](unsigned char n, short v) { event(JS_EVENT_AXIS, n, v); };
   rc_control_settings out{};
   request_rc_off();
+  check(set_navigation_gait_command(1) == NavigationGaitResult::NotInRL,
+        "navigation gait bypassed OFF");
   button(7, 1); button(7, 0); button(6, 1); button(6, 0);
   get_rc_control_settings(&out);
   check(out.mode == RC_mode::OFF, "START/BACK bypassed OFF");
@@ -66,6 +69,8 @@ int main() {
   get_rc_control_settings(&out);
   check(out.mode == RC_mode::RL_JOINT_PD, "could not enter RL");
   check(out.mode == RC_mode::RL_STAIRS, "BACK did not select stairs");
+  check(set_navigation_gait_command(0) == NavigationGaitResult::NavigationInactive,
+        "navigation gait bypassed RB arming");
   axis(1, -16384); // stairs manual vx=.3
   set_cmd_vel_command(.7, .1);
   get_rc_control_settings(&out);
@@ -90,9 +95,13 @@ int main() {
   std::this_thread::sleep_for(std::chrono::milliseconds(1050));
   get_rc_control_settings(&out);
   check(out.v_des[0] == 0, "production first timeout failed");
+  check(set_navigation_gait_command(0) == NavigationGaitResult::NavigationInactive,
+        "stale navigation accepted controller switch");
   std::this_thread::sleep_for(std::chrono::milliseconds(2050));
   get_rc_control_settings(&out);
   check(out.v_des[0] == 0, "production exit timeout failed");
+  check(set_navigation_gait_command(0) == NavigationGaitResult::NavigationInactive,
+        "gait packet re-armed timed-out navigation");
   set_cmd_vel_command(.6, 0);
   get_rc_control_settings(&out);
   check(out.v_des[0] == 0, "late packet resumed motion");
@@ -164,13 +173,59 @@ int main() {
         "D-pad unexpectedly changed mode or velocity");
   button(7, 1); button(7, 0); axis(1, -32768); get_rc_control_settings(&out);
   check(out.mode == RC_mode::RL_FLAT && near(out.v_des[0], 1.), "physical START/flat range incorrect");
-  button(5, 1); set_cmd_vel_command(.3, 0);
+  button(5, 1); // Armed and waiting: gait requests need not wait for velocity.
+  get_rc_control_settings(&out);
+  auto nav_sequence = out.rl_selection_sequence;
+  check(set_navigation_gait_command(-1) == NavigationGaitResult::Invalid &&
+        set_navigation_gait_command(3) == NavigationGaitResult::Invalid,
+        "invalid gait accepted");
+  const auto change_result = NAVIGATION_CONTROLLER_SWITCH_ENABLED ?
+      NavigationGaitResult::Requested : NavigationGaitResult::PrintOnly;
+  check(set_navigation_gait_command(1) == change_result,
+        "upstairs request did not respect compile switch");
+  get_rc_control_settings(&out);
+  check(out.mode == (NAVIGATION_CONTROLLER_SWITCH_ENABLED ? RC_mode::RL_STAIRS : RC_mode::RL_FLAT) &&
+        out.rl_selection_sequence == nav_sequence + NAVIGATION_CONTROLLER_SWITCH_ENABLED &&
+        out.v_des[0] == 0,
+        "gait request changed the wrong RC state or lost waiting navigation");
+  nav_sequence = out.rl_selection_sequence;
+  check(set_navigation_gait_command(2) == (NAVIGATION_CONTROLLER_SWITCH_ENABLED ?
+        NavigationGaitResult::AlreadyRequested : NavigationGaitResult::PrintOnly),
+        "downstairs did not share the stairs controller");
+  check(set_navigation_gait_command(1) == (NAVIGATION_CONTROLLER_SWITCH_ENABLED ?
+        NavigationGaitResult::AlreadyRequested : NavigationGaitResult::PrintOnly),
+        "repeated stairs request retried handover");
+  get_rc_control_settings(&out);
+  check(out.rl_selection_sequence == nav_sequence, "duplicate gait advanced sequence");
+  set_cmd_vel_command(.3, .1);
+  check(set_navigation_gait_command(0) == (NAVIGATION_CONTROLLER_SWITCH_ENABLED ?
+        NavigationGaitResult::Requested : NavigationGaitResult::AlreadyRequested),
+        "flat gait was not mapped to flat controller");
+  get_rc_control_settings(&out);
+  check(out.mode == RC_mode::RL_FLAT &&
+        out.rl_selection_sequence == nav_sequence + NAVIGATION_CONTROLLER_SWITCH_ENABLED &&
+        near(out.v_des[0], .3) && near(out.omega_des[2], .1),
+        "flat request lost navigation velocity or mutated print-only selection");
+  // Prove DOWN by itself can select stairs, not only follow an UP packet.
+  check(set_navigation_gait_command(2) == change_result, "downstairs did not request stairs");
+  get_rc_control_settings(&out);
+  check(out.mode == (NAVIGATION_CONTROLLER_SWITCH_ENABLED ? RC_mode::RL_STAIRS : RC_mode::RL_FLAT),
+        "downstairs selected wrong controller");
+  axis(5, 20000); // RT returns to manual and blocks terrain requests.
+  check(set_navigation_gait_command(0) == NavigationGaitResult::NavigationInactive,
+        "navigation gait defeated RT takeover");
+  axis(5, 0); button(5, 0); button(5, 1); set_cmd_vel_command(.3, 0);
   axis(2, 32767); button(1, 1); button(1, 0); axis(2, 0); // LT+B
   get_rc_control_settings(&out);
   check(out.mode == RC_mode::OFF, "LT+B did not override policy/navigation");
+  check(set_navigation_gait_command(2) == NavigationGaitResult::NotInRL,
+        "terrain request defeated LT+B");
   request_rc_off();
   std::thread publisher([] {
-    for (int i = 0; i < 10000; ++i) set_cmd_vel_command(.8, .8);
+    for (int i = 0; i < 10000; ++i) {
+      set_cmd_vel_command(.8, .8);
+      set_navigation_gait_command(i % 3);
+    }
   });
   for (int i = 0; i < 10000; ++i) {
     request_rc_off();

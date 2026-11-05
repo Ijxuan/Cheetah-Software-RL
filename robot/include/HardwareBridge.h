@@ -23,6 +23,7 @@
 #include "control_parameter_request_lcmt.hpp"
 #include "control_parameter_respones_lcmt.hpp"
 #include "cmd_vel_msg.hpp"
+#include "stair_state_msg.hpp"
 #include "gamepad_lcmt.hpp"
 #include "microstrain_lcmt.hpp"
 #include "ecat_command_t.hpp"
@@ -51,6 +52,8 @@ class HardwareBridge {
                         const gamepad_lcmt* msg);
   void handleCmdVelLCM(const lcm::ReceiveBuffer* rbuf, const std::string& chan,
                        const cmd_vel_msg* msg);
+  void handleStairStateLCM(const lcm::ReceiveBuffer* rbuf, const std::string& chan,
+                          const stair_state_msg* msg);
 
   void handleInterfaceLCM();
   void handleControlParameter(const lcm::ReceiveBuffer* rbuf,

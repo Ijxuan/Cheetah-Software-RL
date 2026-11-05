@@ -33,6 +33,13 @@ class rc_control_settings {
 // Thread-safe navigation input; only accepted after RB arms RL navigation.
 void set_cmd_vel_command(double vx, double wz);
 
+enum class NavigationGaitResult {
+    Invalid, NotInRL, NavigationInactive, AlreadyRequested, PrintOnly, Requested
+};
+// Thread-safe, uses the same navigation ownership and RC lock as velocity input.
+// gait: 0=flat, 1/2=stairs. Does not arm navigation or enter RL from stand/OFF.
+NavigationGaitResult set_navigation_gait_command(int gait);
+
 
 namespace RC_mode{
   constexpr int OFF = 0;

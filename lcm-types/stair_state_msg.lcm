@@ -1,0 +1,8 @@
+struct stair_state_msg
+{
+    int8_t gait;       /* 0=平地 1=上楼梯 2=下楼梯 */
+    int8_t state;      /* /stair_state 原始值 0=FLAT 1=UP 2=DOWN */
+    int8_t is_stairs;  /* 0/1 */
+    double distance;  /* 到楼梯口弧长(m)，-1=前方没有楼梯 */
+    double slope;     /* 前方平均坡度 dz/ds */
+}

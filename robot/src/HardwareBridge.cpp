@@ -60,6 +60,9 @@ void HardwareBridge::initCommon() {
   _interfaceLCM.subscribe("cmd_vel_msg", &HardwareBridge::handleCmdVelLCM, this);
   _interfaceLCM.subscribe("CMD_VEL_LCM", &HardwareBridge::handleCmdVelLCM, this);
   printf("[HardwareBridge] cmd_vel_msg subscribe success: channels cmd_vel, cmd_vel_msg, CMD_VEL_LCM\n");
+  _interfaceLCM.subscribe("STAIR_STATE_LCM", &HardwareBridge::handleStairStateLCM, this);
+  printf("[HardwareBridge] stair_state_msg subscribe success: channel STAIR_STATE_LCM; "
+         "NAVIGATION_CONTROLLER_SWITCH_ENABLED=%d\n", NAVIGATION_CONTROLLER_SWITCH_ENABLED);
   //_interfaceLCM.subscribe ("t265_position_msg", &HardwareBridge::handleT265LCM , this );
 
 
@@ -134,6 +137,35 @@ void HardwareBridge::handleCmdVelLCM(const lcm::ReceiveBuffer* rbuf,
   
   // printf("[HardwareBridge] cmd_vel_msg received on %s: vx=%.3f, wz=%.3f\n",
   //        chan.c_str(), msg->vx, msg->wz);
+}
+
+void HardwareBridge::handleStairStateLCM(const lcm::ReceiveBuffer* rbuf,
+                                        const std::string& chan,
+                                        const stair_state_msg* msg) {
+  (void)rbuf;
+  const char* requestedGait = "无效步态";
+  switch (msg->gait) {
+    case 0: requestedGait = "平地"; break;
+    case 1: requestedGait = "上楼梯"; break;
+    case 2: requestedGait = "下楼梯"; break;
+  }
+  const auto result = set_navigation_gait_command(msg->gait);
+  const char* action = "无效步态，忽略";
+  switch (result) {
+    case NavigationGaitResult::Invalid: break;
+    case NavigationGaitResult::NotInRL: action = "未处于RL模式，忽略"; break;
+    case NavigationGaitResult::NavigationInactive: action = "导航未启用或已超时，忽略"; break;
+    case NavigationGaitResult::AlreadyRequested: action = "目标已请求，无需重复请求"; break;
+    case NavigationGaitResult::PrintOnly: action = "仅打印：满足请求条件，未提交切换"; break;
+    case NavigationGaitResult::Requested: action = "已提交切换请求，等待现有交接流程"; break;
+  }
+  const char* target = msg->gait == 0 ? "平地(54)" :
+                       (msg->gait == 1 || msg->gait == 2 ? "楼梯(53)" : "无效");
+  printf("[Navigation] channel=%s 请求步态=%s gait=%d state=%d is_stairs=%d "
+         "distance=%.3f m slope=%.6f target=%s switch_enabled=%d action=%s\n",
+         chan.c_str(), requestedGait, static_cast<int>(msg->gait),
+         static_cast<int>(msg->state), static_cast<int>(msg->is_stairs),
+         msg->distance, msg->slope, target, NAVIGATION_CONTROLLER_SWITCH_ENABLED, action);
 }
 
 /*!

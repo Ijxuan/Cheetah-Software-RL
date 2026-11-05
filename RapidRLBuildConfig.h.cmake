@@ -1,6 +1,8 @@
 #ifndef RAPID_RL_BUILD_CONFIG_H
 #define RAPID_RL_BUILD_CONFIG_H
 
+#cmakedefine01 NAVIGATION_CONTROLLER_SWITCH_ENABLED
+
 namespace rapid_rl {
 namespace build_config {
 
