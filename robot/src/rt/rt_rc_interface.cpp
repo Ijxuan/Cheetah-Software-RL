@@ -370,7 +370,6 @@ int js_gait = 3;
 int yaw_times = 0;
 int back_time = 0;
 int advance_or_retreat = 1;
-int js_print_count = 0;
 
 template <typename T>
 T clamp(T value, T min_val, T max_val)
@@ -401,21 +400,11 @@ void js_complete(int port)
     ++diagnostic.event_sequence;
     last_joystick_event_time = navigation_time();
 
-    if (++js_print_count >= 100)
-    {
-        js_print_count = 0;
-        printf("[Joystick] raw left=(%d, %d), right=(%d, %d) | norm left=(%.3f, %.3f), right=(%.3f, %.3f)\n",
-               map.lx, map.ly, map.rx, map.ry,
-               (float)map.lx / 32768.f, (float)map.ly / 32768.f,
-               (float)map.rx / 32768.f, (float)map.ry / 32768.f);
-    }
-
     if (map.rb)
     {
         yaw_times = 2800;
         back_time = 0;
         advance_or_retreat = 1;
-        printf("yaw_times is %d\n", yaw_times);
     }
 
     if (map.lt > 30000 && map.a) // LT+A，起立

@@ -84,6 +84,7 @@ int main() {
   auto step = [&](int n) {
     for (int i = 0; i < n; ++i) {
       time += 2000;
+      const bool before_zero = state.policySwitch().zeroCommand();
       const auto before_phase = state.policySwitch().phase();
       const auto before_controller = state.policySwitch().active();
       const JointVector previous = target();
@@ -111,7 +112,7 @@ int main() {
       }
       check(target().allFinite(), "non-finite joint target");
       // Live RC/navigation commands persist while waiting and blending.
-      if (params.use_rc && !state.policySwitch().zeroCommand() &&
+      if (params.use_rc && !before_zero && !state.policySwitch().zeroCommand() &&
           before_controller == state.policySwitch().active() &&
           before_phase != Phase::Preparing && before_phase != Phase::Blocked &&
           state.flatHistory().ready() && state.flatHistory().latest().time_us == time)
@@ -133,8 +134,14 @@ int main() {
   check(std::fabs(legs.commands[0].kpJoint(0, 0) - 17.f) < 1e-6f, "legacy flat gains changed");
   InferenceTimingSummary timing;
   check(!state.stairsRunner().timingSummary(&timing), "inactive HIM policy ran inference");
+  rc.input_diagnostics.navigation_state = 2; // Active navigation snapshot.
   rc.mode = RC_mode::RL_STAIRS; ++rc.rl_selection_sequence;
   estimate.omegaBody[0] = .2f;
+  step(500); // 998 ms since the first control iteration accepts the request.
+  check(state.policySwitch().active() == RLController::Flat &&
+        state.policySwitch().zeroCommand(), "navigation switched before one second");
+  rc.v_des[0] = .4; // New navigation packet during the hold must be retained.
+
   step(150);
   check(state.policySwitch().active() == RLController::Stairs &&
         state.policySwitch().phase() == Phase::Blending, "moving handover waited for angular-speed settling");
@@ -147,6 +154,10 @@ int main() {
   step(450);
   check(state.policySwitch().active() == RLController::Stairs &&
         state.policySwitch().phase() == Phase::Running, "flat -> stairs failed");
+  check(rc.input_diagnostics.navigation_state == 2 &&
+        std::fabs(state.flatHistory().latest().command[0] - .4f) < 1e-6f,
+        "navigation was exited or latest command not restored after blending");
+  rc.input_diagnostics.navigation_state = 0;
   const auto navigation_status = get_navigation_gait_diagnostics();
   check(!navigation_status.switching && navigation_status.cooldown_remaining > 0. &&
         navigation_status.cooldown_remaining <= 2.,

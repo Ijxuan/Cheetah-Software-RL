@@ -184,6 +184,28 @@ int main() {
         "queued request was not processed after blend");
   sw.tick(8100000, true, false); sw.tick(8500000, true, false);
   check(sw.phase() == Phase::Waiting, "handover ignored missing history");
+  // Navigation: exact one-second boundary, duplicate requests, and zero
+  // through blending. Navigation packets are independent of this gate.
+  RLPolicySwitch nav;
+  nav.reset(RLController::Flat, 1, 0);
+  nav.tick(120000, true, true);
+  nav.request(RLController::Stairs, 2, 200000, true, true);
+  check(nav.zeroCommand(), "navigation request did not immediately gate command");
+  nav.request(RLController::Stairs, 2, 900000, true, true);
+  nav.tick(1199999, true, true);
+  check(nav.phase() == Phase::Waiting, "navigation hold shorter than one second");
+  nav.tick(1200000, true, true);
+  check(nav.phase() == Phase::Ready && nav.zeroCommand(), "navigation hold boundary failed");
+  check(nav.activate(RLController::Stairs, 1200000), "navigation transfer failed");
+  nav.finishBlend(1699999, true);
+  check(nav.phase() == Phase::Blending && nav.zeroCommand(), "navigation resumed before blend completion");
+  nav.finishBlend(1700000, true);
+  check(nav.phase() == Phase::Running && !nav.zeroCommand(), "navigation did not resume on completion");
+  nav.request(RLController::Stairs, 3, 1800000, true, true);
+  check(nav.phase() == Phase::Running && !nav.zeroCommand(), "same controller stopped navigation");
+  nav.request(RLController::Flat, 4, 1900000, true, true);
+  nav.request(RLController::Stairs, 5, 2000000, true, true);
+  check(nav.phase() == Phase::Running && !nav.zeroCommand(), "cancel retained navigation hold");
   std::cout << "PASS: legacy observation max_error=" << max_observation_error
             << ", flat target max_error=" << max_flat_error
             << ", HIM action max_error=" << max_him_error

@@ -206,7 +206,7 @@ void ControlFSM<T>::runFSM() {
   }
 
   // Print the current state of the FSM
-  printInfo(0);
+  // State entry/exit and handover logs already report transitions.
 
   // Increase the iteration counter
   iter++;

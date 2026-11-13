@@ -151,6 +151,9 @@ void HardwareBridge::handleStairStateLCM(const lcm::ReceiveBuffer* rbuf,
   }
   NavigationGaitDiagnostics diagnostics;
   const auto result = set_navigation_gait_command(msg->gait, &diagnostics);
+  // Log accepted transitions only; repeated packets and rejected/no-op
+  // requests must not flood the terminal. Actual completion is logged by FSM.
+  if (result != NavigationGaitResult::Requested) return;
   const char* action = "无效步态，忽略";
   switch (result) {
     case NavigationGaitResult::Invalid: break;

@@ -2,8 +2,8 @@
 
 分支 `himloco-onnx-nav-stairs` 在上层 `ControlFSM` 中注册两个独立状态：
 Start 请求 `RL_FLAT`（54），Back 请求 `RL_STAIRS`（53）。原 `RL_JOINT_PD=53`
-保留为楼梯模式的兼容名称。导航提供速度和可选的步态切换请求，切换时保持速度指令并平滑交接，并保留导航
-控制权。导航步态请求默认仅打印；启用编译开关后通过相同的交接流程请求切换。
+保留为楼梯模式的兼容名称。导航提供速度和可选的步态切换请求，导航切换时先零速等待 1 秒再平滑交接，并保留导航
+控制权。导航步态自动切换默认关闭；启用编译开关后通过相同的交接流程请求切换。
 
 实体罗技手柄 Start（Linux 按钮编号 7）进入平地，Back（编号 6）进入楼梯。
 十字键只记录轴 6/7 的值，没有绑定功能；手柄 Mode 键可能在设备侧互换左摇杆与十字键。
@@ -18,7 +18,7 @@ Start 请求 `RL_FLAT`（54），Back 请求 `RL_STAIRS`（53）。原 `RL_JOINT
   和楼梯策略，定义在 `FSM_State_RLPolicies.h`。`ControlFSM.currentState` 实际切换。
 - `ControlFSM` 持有 `RLControlContext`，两个状态共享它。上下文保存模型、
   两套历史、最后下发目标、交接进度和公共保护；它不继承 `FSM_State`。
-- 旧状态在 `run()` 中保留实时速度并检查交接条件，交接准备就绪后仍保持旧状态的控制权。
+- 旧状态在 `run()` 中检查交接条件；导航切换先屏蔽速度 1 秒，交接准备就绪后仍保持旧状态的控制权。
   其 `checkTransition()` 才返回目标状态，随后上层 FSM 调用旧状态的
   `transition()/onExit()` 和新状态的 `onEnter()`。
 - 新状态 `onEnter()` 接管实际目标与两套历史，开始目标和增益过渡。
@@ -103,8 +103,8 @@ lcm-gen -x --cpp-hpath lcm-types/cpp lcm-types/stair_state_msg.lcm
 或 `lcm-gen -c stair_state_msg.lcm`（C）。通道名与类型名分别为
 `STAIR_STATE_LCM` 和 `stair_state_msg`。
 
-每条消息打印一行，以 `gait` 为导航请求：0=平地、1=上楼梯、2=下楼梯，
-其他值显示“无效步态”。同时原样打印 `state`、`is_stairs`、`distance`（米）
+仅实际提交切换请求时打印一行，以 `gait` 为导航请求：0=平地、1=上楼梯、2=下楼梯，
+其他值静默忽略。提交切换时原样打印 `state`、`is_stairs`、`distance`（米）
 和 `slope`（dz/ds）；`distance=-1` 表示前方没有楼梯。
 `state` 是原始检测状态，不用于覆盖 `gait`。控制器目标只由 `gait` 决定：
 0 对应平地 `RL_FLAT=54`，1 和 2 都对应楼梯 `RL_STAIRS=53`。
@@ -117,14 +117,14 @@ cmake -S . -B build-onnx -DNAVIGATION_CONTROLLER_SWITCH_ENABLED=0
 cmake --build build-onnx --target mit_ctrl -j2
 ```
 
-确认日志中的目标与触发条件稳定后，设为 1 并重新编译：
+需要启用导航自动切换时，设为 1 并重新编译：
 
 ```bash
 cmake -S . -B build-onnx -DNAVIGATION_CONTROLLER_SWITCH_ENABLED=1
 cmake --build build-onnx --target mit_ctrl -j2
 ```
 
-开关保存在对应构建目录的 CMake 缓存中，后续普通编译会沿用；恢复只打印需显式
+开关保存在对应构建目录的 CMake 缓存中，后续普通编译会沿用；关闭自动切换需显式
 重新配置为 0。启动时会打印实际编译的开关值。使用对应构建目录生成的
 `mit_ctrl` 和 `robot/librobot.so`，替换部署产物后重启进程。
 
@@ -136,22 +136,21 @@ cmake --build build-onnx --target mit_ctrl -j2
 目标与当前请求模式相同则不重复生成请求，上楼与下楼之间变化也不重复请求。
 连续收到同一控制器目标 **5 次**才满足请求条件；上楼与下楼均计为楼梯目标。
 目标变化、无效消息、消息间隔达到 1 秒、导航退出/超时、重新按 RB 或手动选择
-模式时清空确认次数。前 4 次会打印“拒绝切换：连续确认不足5次”和 `confirm=N/5`。
+模式时清空确认次数。前 4 次只累计确认，不打印。
 
 交接中拒绝新的导航切换请求，不排队；实际目标/增益交接完成后开始 **2 秒冷却**。
-冷却期间打印“拒绝切换：交接后冷却未满2秒”和 `cooldown_remaining`（剩余秒数），
+冷却期间静默拒绝请求，
 不累计确认，冷却结束后仍需新的连续 5 次确认。手柄切换也会在完成后启动导航冷却，
 但手柄和急停不受这两项导航请求限制。
 
-开关为 0 时不会写入模式或请求序号，每累计 5 次打印一次“满足请求条件”后重新计数。
+开关为 0 时不会写入模式或请求序号，也不打印步态包；每累计 5 次后重新计数。
 没有真实交接就不会启动冷却；可先验证连续计数，再启用开关测试实际交接后的冷却。
 开关为 1 时只更新请求模式和请求序号，后续由现有 FSM 执行历史就绪、姿态和模型可用性检查
 及目标/增益交接。“已提交切换请求”不代表实际完成，需观察 `[DualRL] active=...`
 或 `rl_robot_state.mode`。交接超时后同目标消息不会自动重试，可用原手柄选择键重试。
 
 ```text
-[Navigation] channel=STAIR_STATE_LCM 请求步态=上楼梯 gait=1 state=1 is_stairs=1 distance=1.250 m slope=0.200000 target=楼梯(53) switch_enabled=0 confirm=3/5 cooldown_remaining=0.000 s action=拒绝切换：连续确认不足5次
-[Navigation] channel=STAIR_STATE_LCM 请求步态=平地 gait=0 state=0 is_stairs=0 distance=-1.000 m slope=0.000000 target=平地(54) switch_enabled=1 confirm=0/5 cooldown_remaining=1.650 s action=拒绝切换：交接后冷却未满2秒
+[Navigation] channel=STAIR_STATE_LCM 请求步态=平地 gait=0 state=0 is_stairs=0 distance=-1.000 m slope=0.000000 target=平地(54) switch_enabled=1 confirm=5/5 cooldown_remaining=0.000 s action=已提交切换请求，等待现有交接流程
 ```
 
 ## 操作与状态
@@ -171,17 +170,22 @@ cmake --build build-onnx --target mit_ctrl -j2
    恢复起立/RL 不会自动恢复导航，需要新的 RB 按下沿。
 
 导航中可直接按 Start 选择平地、Back 选择楼梯，无需退出或重新开启导航。
-在两个 RL 状态间等待交接、交接和混合时，持续使用最新有效导航/手动速度，
-仍遵守各控制器的速度上限。取消机身角速度 `<0.2 rad/s` 和连续稳定 200 ms 的限制。
+导航模式下接受切换请求后，目标线速度和角速度立即归零，满 1 秒才允许交接。
+等待和混合阶段持续屏蔽速度，但导航保持开启并继续接收新速度、检查超时。
+混合完成后立即解除屏蔽，在下一正常策略帧使用最新有效导航速度，没有额外等待。
+选择当前控制器不会停车；非导航模式保持实时手动速度交接。
+仍遵守各控制器速度上限，不要求角速度 `<0.2 rad/s` 或连续稳定 200 ms。
 两套历史就绪、模型可用、状态有限值检查及切入平地总倾角 `≤30°` 的条件仍保留。
 目标角与增益用 500 ms 过渡，每次策略输出目标角变化限制为 0.05 rad；
-若仍被限制截断，延长交接直到目标跟上。该过程允许运动中交接，实机平顺性需验证。
+若仍被限制截断，延长交接直到目标跟上。零速指令不等同于实际停稳，实机平顺性需验证。
 
 5 秒内不能满足交接条件，或请求模型不可用，会保持当前控制器零速并打印 `blocked`，
 需重新按 Start/Back 重试。选择当前控制器可取消尚未交接的请求。长按不重复请求；
 混合中的新选择排队，完成后处理。启动历史预热和阻塞阶段仍输出零速度。
-导航超时仍生效，不会因切换完成而自行恢复。RT 可随时转为手动速度，
+导航超时仍生效，不会因切换完成而自行恢复。RT 可随时退出导航，但已开始的导航交接仍保持零速到完成，
 LT+B 和安全故障始终可以中止流程。自动导航步态请求的确认/冷却规则保持不变。
+终端只打印已提交的切换请求及实际交接阶段；重复、拒绝和仅打印模式的步态包静默处理。
+关闭手柄原始值、常规 FSM 状态和推理统计的周期打印，故障告警保留。
 
 两套策略共用最终关节限幅、目标偏差告警、推理硬超时以及 OFF/失能链路。
 HIM 保持 roll/pitch 各 45° 的姿态保护；平地额外保留旧分支总倾角 30° 的保护，
@@ -192,7 +196,7 @@ HIM 保持 roll/pitch 各 45° 的姿态保护；平地额外保留旧分支总�
 `rl_robot_state.mode` 平地为 54、楼梯为 53，两种策略均以 HIM 关节顺序发布 q/qd/last_action，
 平地的 last_action 是目标换算值，不能当作旧平地 actor 的原始输出。
 
-导航速度状态只在采样观察到变化时打印；步态消息每条打印一行 `[Navigation]`。
+导航速度状态只在采样观察到变化时打印；步态消息仅提交切换请求时打印 `[Navigation]`。
 默认开启的 `rl_robot_state.command` 可用于观察经控制器限幅/死区后的最终输入。
 零速度是 HIM 的停步指令，不是机械锁止，也不等于关节失能。
 
@@ -224,7 +228,7 @@ ctest --output-on-failure -R 'navigation_command|legged_gym_rl_policy_config|him
 测试不启动硬件桥、不发布 LCM 运动指令、不驱动电机。
 `navigation_command` 还覆盖导航步态到双控制器的映射、重复请求、RB/RT/OFF 门控
 及速度超时，并覆盖连续 5 次确认、目标波动/断流清零、2 秒冷却边界、交接中拒绝
-及手柄取消待处理请求。分别以开关为 0 和 1 编译运行，可验证仅打印与提交请求两个分支。
+及手柄取消待处理请求。分别以开关为 0 和 1 编译运行，可验证不提交与提交请求两个分支。
 `dual_rl_policy` 对照旧平地的观测布局及模型输出，并验证 HIM 历史更新与推理拆分
 前后的输出一致性。`dual_rl_controller` 用真实模型和注入的时间/机器人状态调用
 生产 `ControlFSM.runFSM()`，覆盖真实状态身份、跨状态历史连续性、两个方向的

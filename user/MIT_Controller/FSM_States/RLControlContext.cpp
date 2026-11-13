@@ -9,6 +9,7 @@
 
 #include <Configuration.h>
 #include <rt/rt_rc_interface.h>
+#include <rt/NavigationCommand.h>
 #include "RapidRLBuildConfig.h"
 #include "Utilities/utilities.h"
 #include "main_helper.h"
@@ -366,7 +367,12 @@ bool RLControlContext<T>::handoverEligible(RLController selected) const {
 
 template <typename T>
 void RLControlContext<T>::request(RLController controller, uint64_t sequence) {
-  _switch.request(controller, sequence, nowUs(), controllerReady(controller));
+  const auto* rc = _data->_desiredStateCommand->rcCommand;
+  // Latch navigation ownership when the request is first accepted. Packet
+  // reception/timeout continues independently while policy commands are zero.
+  const bool navigation = _data->controlParameters->use_rc &&
+      rc->input_diagnostics.navigation_state != static_cast<int>(NavigationCommand::State::Manual);
+  _switch.request(controller, sequence, nowUs(), controllerReady(controller), navigation);
 }
 
 template <typename T>
@@ -541,15 +547,6 @@ bool RLControlContext<T>::runOnnxPolicy(int64_t now_us) {
               << std::endl;
     requestEmergencyStop();
     return false;
-  }
-
-  rapid_rl::InferenceTimingSummary timing;
-  if (_onnxRunner->timingSummary(&timing) &&
-      (timing.count == 1 || timing.count == 50 || timing.count % 500 == 0)) {
-    std::cout << "[LeggedGymRL] ONNX Runtime timing count=" << timing.count
-              << " min/mean/p95/max=" << timing.min_ms << "/"
-              << timing.mean_ms << "/" << timing.p95_ms << "/"
-              << timing.max_ms << " ms" << std::endl;
   }
 
   if (shouldHardStopForInference(inference_time_ms)) {
