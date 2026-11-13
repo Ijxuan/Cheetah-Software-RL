@@ -51,7 +51,7 @@ class RLControlContext {
   bool runOnnxPolicy(int64_t now_us);
   bool runFlatPolicy(int64_t now_us);
   bool controllerReady(RLController selected) const;
-  bool stationaryFor(RLController selected) const;
+  bool handoverEligible(RLController selected) const;
   bool updateHistories(int64_t now_us);
   void runAtTime(RLController owner, int64_t now_us);
   void reportSwitch();

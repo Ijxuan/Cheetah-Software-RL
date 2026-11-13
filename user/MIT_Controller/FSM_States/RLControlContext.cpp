@@ -41,8 +41,6 @@ constexpr float kMaxKnee = 3.0f;
 constexpr float kMaxRollPitchDeg = 45.0f;
 constexpr float kMaxRollPitchRad =
     kMaxRollPitchDeg * static_cast<float>(M_PI) / 180.0f;
-// Handover allows translation and leg motion; only body rotation must settle.
-constexpr float kMaxHandoverAngularSpeed = .2f;  // rad/s
 // Preserve the legacy flat policy's total body-tilt limit, including blending.
 constexpr float kMaxFlatTiltDeg = 30.f;
 constexpr float kMaxFlatTiltRad = kMaxFlatTiltDeg * static_cast<float>(M_PI) / 180.f;
@@ -264,7 +262,7 @@ void RLControlContext<T>::runAtTime(RLController owner, int64_t now_us) {
     requestEmergencyStop();
     return;
   }
-  _switch.tick(now_us, stationaryFor(_switch.requested()),
+  _switch.tick(now_us, handoverEligible(_switch.requested()),
                _flatHistory.ready() && _onnxRunner->historyReady());
   // A prepared observation was recorded with zero command this cycle. Keep it
   // until the next policy frame, then resume the newest live RC/nav command.
@@ -359,12 +357,11 @@ bool RLControlContext<T>::controllerReady(RLController selected) const {
 }
 
 template <typename T>
-bool RLControlContext<T>::stationaryFor(RLController selected) const {
+bool RLControlContext<T>::handoverEligible(RLController selected) const {
   const auto& estimate = _data->_stateEstimator->getResult();
   const Vec12f qd = readRobotQd();
   return (selected != RLController::Flat || estimate.rBody(2, 2) >= std::cos(kMaxFlatTiltRad)) &&
-      estimate.vBody.allFinite() && estimate.omegaBody.allFinite() && qd.allFinite() &&
-      estimate.omegaBody.norm() < kMaxHandoverAngularSpeed;
+      estimate.vBody.allFinite() && estimate.omegaBody.allFinite() && qd.allFinite();
 }
 
 template <typename T>
@@ -377,7 +374,7 @@ bool RLControlContext<T>::transferReady(RLController controller) const {
   const int64_t now = nowUs();
   return !_emergencyStop && _sessionActive && controllerReady(controller) &&
       _switch.phase() == RLPolicySwitch::Phase::Ready && _switch.requested() == controller &&
-      !isOrientationUnsafe() && stationaryFor(controller) &&
+      !isOrientationUnsafe() && handoverEligible(controller) &&
       now >= _lastHistoryTimeUs && now - _lastHistoryTimeUs <= 30000 &&
       now >= _lastStairsHistoryTimeUs && now - _lastStairsHistoryTimeUs <= 60000;
 }

@@ -145,16 +145,17 @@ int main() {
   sw.tick(120001, true, true);
   check(sw.phase() == Phase::Running, "startup did not finish");
   sw.request(RLController::Stairs, 2, 200000, true);
-  sw.tick(210000, true, true); sw.tick(400000, false, true);
-  sw.tick(500000, true, true); sw.tick(699999, true, true);
-  check(sw.active() == RLController::Flat && sw.phase() == Phase::Stopping, "ready before continuous 200 ms settling");
-  sw.tick(700000, true, true);
-  check(sw.active() == RLController::Flat && sw.phase() == Phase::Ready,
-        "preparation changed policy owner before FSM onEnter");
+  sw.tick(210000, true, false);
+  check(sw.phase() == Phase::Waiting && !sw.zeroCommand(), "waiting cleared live command");
+  sw.tick(220000, false, true);
+  check(sw.phase() == Phase::Waiting, "ineligible destination accepted");
+  sw.tick(230000, true, true);
+  check(sw.active() == RLController::Flat && sw.phase() == Phase::Ready && !sw.zeroCommand(),
+        "ready handover delayed or cleared live command");
   check(!sw.activate(RLController::Flat, 800000), "wrong destination activated");
   check(sw.activate(RLController::Stairs, 800000), "destination onEnter could not activate");
   check(sw.active() == RLController::Stairs && sw.phase() == Phase::Blending &&
-        sw.blend(800000) == 0.f, "handover entry incorrect");
+        sw.blend(800000) == 0.f && !sw.zeroCommand(), "handover entry incorrect");
   sw.finishBlend(1299999, true);
   check(sw.phase() == Phase::Blending, "blend completed too soon");
   sw.finishBlend(1300000, false);
@@ -179,10 +180,10 @@ int main() {
   check(sw.active() == RLController::Flat && sw.phase() == Phase::Blending,
         "queued request interrupted blend");
   sw.finishBlend(8100000, true);
-  check(sw.active() == RLController::Flat && sw.phase() == Phase::Stopping,
+  check(sw.active() == RLController::Flat && sw.phase() == Phase::Waiting,
         "queued request was not processed after blend");
   sw.tick(8100000, true, false); sw.tick(8500000, true, false);
-  check(sw.phase() == Phase::Stopping, "handover ignored missing history");
+  check(sw.phase() == Phase::Waiting, "handover ignored missing history");
   std::cout << "PASS: legacy observation max_error=" << max_observation_error
             << ", flat target max_error=" << max_flat_error
             << ", HIM action max_error=" << max_him_error

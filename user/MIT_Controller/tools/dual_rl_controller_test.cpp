@@ -110,14 +110,17 @@ int main() {
         check(delta <= .05001f, "handover target step exceeded .05 rad");
       }
       check(target().allFinite(), "non-finite joint target");
-      // A held nonzero RC command must return after every completed handover.
-      if (params.use_rc && before_phase == Phase::Running && after_phase == Phase::Running &&
+      // Live RC/navigation commands persist while waiting and blending.
+      if (params.use_rc && !state.policySwitch().zeroCommand() &&
+          before_controller == state.policySwitch().active() &&
+          before_phase != Phase::Preparing && before_phase != Phase::Blocked &&
           state.flatHistory().ready() && state.flatHistory().latest().time_us == time)
         check(std::fabs(state.flatHistory().latest().command[0] -
               std::max(-float(RC_mode::forwardSpeedLimit(state.activeMode())),
                        std::min(float(RC_mode::forwardSpeedLimit(state.activeMode())), float(rc.v_des[0])))) < 1e-6f,
-              "forward command remained zero after handover");
-      if (state.policySwitch().zeroCommand() && state.flatHistory().ready() &&
+              "live command lost during handover");
+      if (state.policySwitch().zeroCommand() && before_phase == after_phase &&
+          state.flatHistory().ready() &&
           state.flatHistory().latest().time_us == time)
         check(state.flatHistory().latest().command.norm() == 0.f, "switch failed to command zero");
     }
@@ -133,8 +136,8 @@ int main() {
   rc.mode = RC_mode::RL_STAIRS; ++rc.rl_selection_sequence;
   estimate.omegaBody[0] = .2f;
   step(150);
-  check(state.policySwitch().active() == RLController::Flat &&
-        state.policySwitch().phase() == Phase::Stopping, "switched at angular-speed limit");
+  check(state.policySwitch().active() == RLController::Stairs &&
+        state.policySwitch().phase() == Phase::Blending, "moving handover waited for angular-speed settling");
   check(get_navigation_gait_diagnostics().switching &&
         get_navigation_gait_diagnostics().cooldown_remaining == 0.,
         "navigation cooldown started before actual handover completion");
@@ -166,7 +169,7 @@ int main() {
   estimate.rpy[0] = 31.f * float(M_PI) / 180.f;
   estimate.rBody = Eigen::AngleAxisf(estimate.rpy[0], Eigen::Vector3f::UnitX()).toRotationMatrix();
   step(150);
-  check(fsm.currentState == &stairs && state.policySwitch().phase() == Phase::Stopping,
+  check(fsm.currentState == &stairs && state.policySwitch().phase() == Phase::Waiting,
         "entered flat above 30 degree tilt limit");
   estimate.rpy.setZero(); estimate.rBody.setIdentity();
   step(450);
@@ -180,15 +183,21 @@ int main() {
   state.stairsRunner().timingSummary(&timing);
   check(timing.count == count_flat, "inactive HIM inference kept running");
   rc.mode = RC_mode::RL_STAIRS; ++rc.rl_selection_sequence;
-  estimate.omegaBody[0] = .2f;
+  estimate.omegaBody[0] = .4f;
+  step(600);
+  check(state.policySwitch().active() == RLController::Stairs &&
+        state.policySwitch().phase() == Phase::Running, "moving switch failed");
+  rc.mode = RC_mode::RL_FLAT; ++rc.rl_selection_sequence;
+  estimate.rpy[0] = 31.f * float(M_PI) / 180.f;
+  estimate.rBody = Eigen::AngleAxisf(estimate.rpy[0], Eigen::Vector3f::UnitX()).toRotationMatrix();
   step(2600);
   check(state.policySwitch().phase() == Phase::Blocked &&
-        state.policySwitch().active() == RLController::Flat, "handover timeout failed");
+        state.policySwitch().active() == RLController::Stairs, "handover timeout failed");
+  estimate.rpy.setZero(); estimate.rBody.setIdentity();
   estimate.omegaBody.setZero(); step(200);
   check(state.policySwitch().phase() == Phase::Blocked, "timeout resumed automatically");
-  ++rc.rl_selection_sequence; step(450);
-  check(state.policySwitch().active() == RLController::Stairs &&
-        state.policySwitch().phase() == Phase::Running, "fresh selection did not retry");
+  rc.mode = RC_mode::RL_STAIRS; ++rc.rl_selection_sequence; step(450);
+  check(state.policySwitch().phase() == Phase::Running, "active selection did not cancel blocked switch");
   check(estimator_runs == 0, "policy ran state estimator a second time");
   estimate.rpy[0] = .8f; time += 2000; fsm.runFSM();
   rc_control_settings shared{}; get_rc_control_settings(&shared);

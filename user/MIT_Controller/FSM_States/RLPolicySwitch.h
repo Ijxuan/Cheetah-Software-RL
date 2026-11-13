@@ -6,9 +6,8 @@
 // Pure handover state machine; all times are monotonic microseconds.
 class RLPolicySwitch {
  public:
-  enum class Phase { Preparing, Running, Stopping, Ready, Blending, Blocked };
-  static constexpr int64_t kSettledUs = 200000;
-  static constexpr int64_t kStopTimeoutUs = 5000000;
+  enum class Phase { Preparing, Running, Waiting, Ready, Blending, Blocked };
+  static constexpr int64_t kReadyTimeoutUs = 5000000;
   static constexpr int64_t kBlendUs = 500000;
   static constexpr int64_t kWarmupUs = 120000;
 
@@ -18,7 +17,6 @@ class RLPolicySwitch {
     sequence_ = sequence;
     phase_ = Phase::Preparing;
     started_ = now;
-    settled_since_ = -1;
   }
   void request(RLController selected, uint64_t sequence, int64_t now, bool available) {
     if (sequence == sequence_ && selected == requested_) return;
@@ -28,27 +26,23 @@ class RLPolicySwitch {
     // Do not interrupt a blend midway. Queue the latest request until it ends.
     if (phase_ == Phase::Blending) return;
     started_ = now;
-    settled_since_ = -1;
     if (!available_) phase_ = Phase::Blocked;
     else if (phase_ == Phase::Preparing) return;
-    else phase_ = selected == active_ ? Phase::Running : Phase::Stopping;
+    else phase_ = selected == active_ ? Phase::Running : Phase::Waiting;
   }
-  void tick(int64_t now, bool stationary, bool histories_ready) {
-    if (phase_ == Phase::Ready && (!stationary || !histories_ready)) {
-      phase_ = Phase::Stopping;
+  void tick(int64_t now, bool eligible, bool histories_ready) {
+    if (phase_ == Phase::Ready && (!eligible || !histories_ready)) {
+      phase_ = Phase::Waiting;
       started_ = now;
-      settled_since_ = -1;
     }
     if (phase_ == Phase::Preparing) {
       if (histories_ready && now - started_ >= kWarmupUs) {
-        phase_ = active_ == requested_ ? Phase::Running : Phase::Stopping;
+        phase_ = active_ == requested_ ? Phase::Running : Phase::Waiting;
         started_ = now;
       }
-    } else if (phase_ == Phase::Stopping) {
-      if (now - started_ >= kStopTimeoutUs) { phase_ = Phase::Blocked; return; }
-      if (!stationary || !histories_ready) settled_since_ = -1;
-      else if (settled_since_ < 0) settled_since_ = now;
-      if (settled_since_ >= 0 && now - settled_since_ >= kSettledUs) {
+    } else if (phase_ == Phase::Waiting) {
+      if (now - started_ >= kReadyTimeoutUs) { phase_ = Phase::Blocked; return; }
+      if (eligible && histories_ready) {
         // The old state remains owner until ControlFSM enters the new state.
         phase_ = Phase::Ready;
       }
@@ -64,15 +58,17 @@ class RLPolicySwitch {
   void finishBlend(int64_t now, bool target_reached) {
     if (phase_ != Phase::Blending || now - started_ < kBlendUs || !target_reached) return;
     phase_ = !available_ ? Phase::Blocked :
-        active_ == requested_ ? Phase::Running : Phase::Stopping;
+        active_ == requested_ ? Phase::Running : Phase::Waiting;
     started_ = now;
-    settled_since_ = -1;
   }
   float blend(int64_t now) const {
     if (phase_ != Phase::Blending) return 1.f;
     return std::min(1.f, std::max(0.f, float(now - started_) / kBlendUs));
   }
-  bool zeroCommand() const { return phase_ != Phase::Running; }
+  // Keep live RC/navigation commands through a valid moving handover.
+  bool zeroCommand() const {
+    return phase_ == Phase::Preparing || phase_ == Phase::Blocked;
+  }
   Phase phase() const { return phase_; }
   RLController active() const { return active_; }
   RLController requested() const { return requested_; }
@@ -80,7 +76,7 @@ class RLPolicySwitch {
     switch (phase) {
       case Phase::Preparing: return "preparing history";
       case Phase::Running: return "running";
-      case Phase::Stopping: return "stopping";
+      case Phase::Waiting: return "waiting for handover readiness";
       case Phase::Ready: return "ready for FSM transfer";
       case Phase::Blending: return "blending";
       case Phase::Blocked: return "blocked: zero command; press START/BACK to retry";
@@ -93,5 +89,5 @@ class RLPolicySwitch {
   Phase phase_ = Phase::Preparing;
   uint64_t sequence_ = 0;
   bool available_ = true;
-  int64_t started_ = 0, settled_since_ = -1;
+  int64_t started_ = 0;
 };
